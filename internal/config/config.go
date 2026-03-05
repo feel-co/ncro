@@ -21,7 +21,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		// Try decoding as a raw int64 (nanoseconds) as fallback.
 		var ns int64
 		if err2 := value.Decode(&ns); err2 != nil {
-			return fmt.Errorf("cannot unmarshal duration: %w", err)
+			return fmt.Errorf("cannot unmarshal duration (tried string: %v): %w", err, err2)
 		}
 		d.Duration = time.Duration(ns)
 		return nil

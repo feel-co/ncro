@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"testing"
+	"time"
 
 	"notashelf.dev/ncro/internal/config"
 )
@@ -59,5 +60,55 @@ func TestEnvOverride(t *testing.T) {
 	}
 	if cfg.Server.Listen != ":1234" {
 		t.Errorf("env override listen = %q, want :1234", cfg.Server.Listen)
+	}
+}
+
+func TestDurationParsing(t *testing.T) {
+	yamlContent := `
+server:
+  listen: ":8080"
+  read_timeout: 30s
+  write_timeout: 1m
+cache:
+  ttl: 2h
+mesh:
+  gossip_interval: 45s
+`
+	f, _ := os.CreateTemp("", "ncro-dur-*.yaml")
+	defer os.Remove(f.Name())
+	f.WriteString(yamlContent)
+	f.Close()
+
+	cfg, err := config.Load(f.Name())
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.Server.ReadTimeout.Duration != 30*time.Second {
+		t.Errorf("read_timeout = %v, want 30s", cfg.Server.ReadTimeout.Duration)
+	}
+	if cfg.Server.WriteTimeout.Duration != time.Minute {
+		t.Errorf("write_timeout = %v, want 1m", cfg.Server.WriteTimeout.Duration)
+	}
+	if cfg.Cache.TTL.Duration != 2*time.Hour {
+		t.Errorf("ttl = %v, want 2h", cfg.Cache.TTL.Duration)
+	}
+	if cfg.Mesh.GossipInterval.Duration != 45*time.Second {
+		t.Errorf("gossip_interval = %v, want 45s", cfg.Mesh.GossipInterval.Duration)
+	}
+}
+
+func TestInvalidDuration(t *testing.T) {
+	yamlContent := `
+server:
+  read_timeout: "bananas"
+`
+	f, _ := os.CreateTemp("", "ncro-bad-*.yaml")
+	defer os.Remove(f.Name())
+	f.WriteString(yamlContent)
+	f.Close()
+
+	_, err := config.Load(f.Name())
+	if err == nil {
+		t.Error("expected error for invalid duration string, got nil")
 	}
 }
