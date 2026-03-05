@@ -8,9 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Duration is a wrapper around time.Duration that supports YAML unmarshaling
-// from Go duration strings (e.g., "30s", "1h"). yaml.v3 cannot unmarshal
-// duration strings directly into time.Duration (int64), so we handle it here.
+// Wrapper around time.Duration supporting YAML duration strings ("30s", "1h").
+// yaml.v3 cannot unmarshal duration strings directly into time.Duration (int64).
 type Duration struct {
 	time.Duration
 }
@@ -101,7 +100,7 @@ func defaults() Config {
 	}
 }
 
-// Load loads config from file (if non-empty) and applies env overrides.
+// Loads config from file (if non-empty) and applies env overrides.
 func Load(path string) (*Config, error) {
 	cfg := defaults()
 
