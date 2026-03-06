@@ -178,14 +178,13 @@ func TestResolveWithDownUpstream(t *testing.T) {
 }
 
 func TestSingleflightDedup(t *testing.T) {
-	var headCount, getCount int32
+	var headCount int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
 			atomic.AddInt32(&headCount, 1)
 			time.Sleep(30 * time.Millisecond) // ensure goroutines overlap
 			w.WriteHeader(http.StatusOK)
 		} else {
-			atomic.AddInt32(&getCount, 1)
 			w.Header().Set("Content-Type", "text/x-nix-narinfo")
 			fmt.Fprintln(w, "StorePath: /nix/store/abc123-test")
 		}
