@@ -4,7 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
-	"flag"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"notashelf.dev/ncro/internal/cache"
 	"notashelf.dev/ncro/internal/config"
 	"notashelf.dev/ncro/internal/mesh"
@@ -23,17 +26,34 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to config YAML file")
-	flag.Parse()
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		slog.Error("failed to load config", "error", err)
+	if err := newRootCmd().Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func newRootCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:          "ncro",
+		Short:        "Nix Cache Route Optimizer",
+		SilenceUsage: true,
+		RunE:         runServer,
+	}
+
+	cmd.Flags().StringP("config", "c", "", "path to config YAML file (env: NCRO_CONFIG)")
+	_ = viper.BindPFlag("config", cmd.Flags().Lookup("config"))
+	viper.SetEnvPrefix("NCRO")
+	viper.AutomaticEnv()
+
+	return cmd
+}
+
+func runServer(_ *cobra.Command, _ []string) error {
+	cfg, err := config.Load(viper.GetString("config"))
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
 	if err := cfg.Validate(); err != nil {
-		slog.Error("invalid config", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid config: %w", err)
 	}
 
 	level := slog.LevelInfo
@@ -57,8 +77,7 @@ func main() {
 
 	db, err := cache.Open(cfg.Cache.DBPath, cfg.Cache.MaxEntries)
 	if err != nil {
-		slog.Error("failed to open database", "path", cfg.Cache.DBPath, "error", err)
-		os.Exit(1)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer db.Close()
 
@@ -87,7 +106,6 @@ func main() {
 	p := prober.New(cfg.Cache.LatencyAlpha)
 	p.InitUpstreams(cfg.Upstreams)
 
-	// Seed prober with persisted health data from the previous run.
 	if rows, err := db.LoadAllHealth(); err == nil {
 		for _, row := range rows {
 			p.Seed(row.URL, row.EMALatency, row.ConsecutiveFails, int64(row.TotalQueries))
@@ -96,7 +114,6 @@ func main() {
 		slog.Warn("failed to load persisted health data", "error", err)
 	}
 
-	// Persist health updates to SQLite.
 	p.SetHealthPersistence(func(url string, ema float64, cf uint32, tq uint64) {
 		if err := db.SaveHealth(url, ema, int(cf), int64(tq)); err != nil {
 			slog.Warn("failed to save health", "url", url, "error", err)
@@ -114,8 +131,7 @@ func main() {
 	for _, u := range cfg.Upstreams {
 		if u.PublicKey != "" {
 			if err := r.SetUpstreamKey(u.URL, u.PublicKey); err != nil {
-				slog.Error("invalid upstream public key", "url", u.URL, "error", err)
-				os.Exit(1)
+				return fmt.Errorf("invalid upstream public key for %s: %w", u.URL, err)
 			}
 			slog.Info("narinfo signature verification enabled", "upstream", u.URL)
 		}
@@ -126,8 +142,7 @@ func main() {
 		store := mesh.NewRouteStore()
 		node, err := mesh.NewNode(cfg.Mesh.PrivateKeyPath, store)
 		if err != nil {
-			slog.Error("failed to create mesh node", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("create mesh node: %w", err)
 		}
 		slog.Info("mesh node identity", "node_id", node.ID(),
 			"public_key", hex.EncodeToString(node.PublicKey()))
@@ -141,8 +156,7 @@ func main() {
 		}
 
 		if err := mesh.ListenAndServe(cfg.Mesh.BindAddr, store, allowedKeys...); err != nil {
-			slog.Error("failed to start mesh listener", "addr", cfg.Mesh.BindAddr, "error", err)
-			os.Exit(1)
+			return fmt.Errorf("start mesh listener: %w", err)
 		}
 
 		peerAddrs := make([]string, len(cfg.Mesh.Peers))
@@ -165,16 +179,21 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	serverErr := make(chan error, 1)
 	go func() {
 		slog.Info("ncro listening", "addr", cfg.Server.Listen, "upstreams", len(cfg.Upstreams))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
 		}
+		close(serverErr)
 	}()
 
-	<-stop
-	slog.Info("shutting down")
+	select {
+	case <-stop:
+		slog.Info("shutting down")
+	case err := <-serverErr:
+		return fmt.Errorf("server: %w", err)
+	}
 
 	close(expireDone)
 	close(probeDone)
@@ -185,6 +204,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("shutdown error", "error", err)
+		slog.Warn("shutdown error", "error", err)
 	}
+	return nil
 }
