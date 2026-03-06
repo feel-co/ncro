@@ -177,9 +177,11 @@ func (p *Prober) SortedByLatency() []*UpstreamHealth {
 		if aDown != bDown {
 			return bDown // non-down first
 		}
-		// Within 10% latency difference: prefer lower priority number.
+		// Within 10% latency difference: prefer lower priority number, then lower latency.
 		if b.EMALatency > 0 && math.Abs(a.EMALatency-b.EMALatency)/b.EMALatency < 0.10 {
-			return a.Priority < b.Priority
+			if a.Priority != b.Priority {
+				return a.Priority < b.Priority
+			}
 		}
 		return a.EMALatency < b.EMALatency
 	})
