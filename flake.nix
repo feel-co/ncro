@@ -1,5 +1,4 @@
 {
-  description = "Go Project Template";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs?ref=nixos-unstable";
 
   outputs = {
@@ -12,12 +11,18 @@
     pkgsForEach = nixpkgs.legacyPackages;
   in {
     packages = forEachSystem (system: {
-      default = pkgsForEach.${system}.callPackage ./nix/package.nix {};
+      ncro = pkgsForEach.${system}.callPackage ./nix/package.nix {};
+      default = self.packages.${system}.ncro;
     });
 
     devShells = forEachSystem (system: {
       default = pkgsForEach.${system}.callPackage ./nix/shell.nix {};
     });
+
+    nixosModules = {
+      ncro = import ./nix/module.nix self;
+      default = self.nixosModules.ncro;
+    };
 
     hydraJobs = self.packages;
   };
