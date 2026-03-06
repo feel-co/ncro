@@ -254,6 +254,46 @@ func (d *DB) ExpireNegatives() error {
 	return err
 }
 
+// Persisted snapshot of one upstream's health metrics.
+type HealthRow struct {
+	URL              string
+	EMALatency       float64
+	ConsecutiveFails int
+	TotalQueries     int64
+}
+
+// Upserts the health metrics for the given upstream URL.
+func (d *DB) SaveHealth(url string, ema float64, consecutiveFails int, totalQueries int64) error {
+	_, err := d.db.Exec(`
+		INSERT INTO upstream_health (url, ema_latency, consecutive_fails, total_queries)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(url) DO UPDATE SET
+			ema_latency       = excluded.ema_latency,
+			consecutive_fails = excluded.consecutive_fails,
+			total_queries     = excluded.total_queries`,
+		url, ema, consecutiveFails, totalQueries,
+	)
+	return err
+}
+
+// Returns all rows from the upstream_health table.
+func (d *DB) LoadAllHealth() ([]HealthRow, error) {
+	rows, err := d.db.Query(`SELECT url, ema_latency, consecutive_fails, total_queries FROM upstream_health`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []HealthRow
+	for rows.Next() {
+		var r HealthRow
+		if err := rows.Scan(&r.URL, &r.EMALatency, &r.ConsecutiveFails, &r.TotalQueries); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 // Deletes the oldest routes (by last_verified) when over capacity.
 func (d *DB) evictIfNeeded() error {
 	count, err := d.RouteCount()

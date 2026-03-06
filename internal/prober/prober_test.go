@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"notashelf.dev/ncro/internal/config"
 	"notashelf.dev/ncro/internal/prober"
 )
 
@@ -104,7 +106,7 @@ func TestSortedByLatencyWithPriority(t *testing.T) {
 		t.Fatalf("expected 2, got %d", len(sorted))
 	}
 	// The 100ms upstream should be first (lower latency wins when not within 10% tie).
-	// 100 vs 102: diff=2, 2/102=1.96% < 10%, so priority decides (both priority=0, tie → latency).
+	// 100 vs 102: diff=2, 2/102=1.96% < 10%, so priority decides (both priority=0, tie --> latency).
 	// Actually 100 < 102 still wins on latency when priority is equal.
 	if sorted[0].EMALatency > sorted[1].EMALatency {
 		t.Errorf("expected lower latency first, got %.2f then %.2f", sorted[0].EMALatency, sorted[1].EMALatency)
@@ -113,10 +115,52 @@ func TestSortedByLatencyWithPriority(t *testing.T) {
 
 func TestProbeUpstreamFailure(t *testing.T) {
 	p := prober.New(0.3)
-	p.ProbeUpstream("http://127.0.0.1:1") // nothing listening
+	p.ProbeUpstream("http://127.0.0.1:1") // nothing listening, maybe except for Makima
 
 	h := p.GetHealth("http://127.0.0.1:1")
 	if h == nil || h.ConsecutiveFails == 0 {
 		t.Error("expected failure recorded")
+	}
+}
+
+func TestSeedRestoresStatus(t *testing.T) {
+	p := prober.New(0.3)
+	p.InitUpstreams([]config.UpstreamConfig{{URL: "https://down.example.com"}})
+
+	// Seed with 10 consecutive fails -> should be StatusDown
+	p.Seed("https://down.example.com", 200.0, 10, 50)
+
+	h := p.GetHealth("https://down.example.com")
+	if h == nil {
+		t.Fatal("expected health entry")
+	}
+	if h.Status != prober.StatusDown {
+		t.Errorf("Status = %v, want StatusDown", h.Status)
+	}
+	if h.EMALatency != 200.0 {
+		t.Errorf("EMALatency = %f, want 200.0", h.EMALatency)
+	}
+}
+
+func TestPersistenceCallbackFired(t *testing.T) {
+	p := prober.New(0.3)
+	p.InitUpstreams([]config.UpstreamConfig{{URL: "https://up.example.com"}})
+
+	var savedURL string
+	var savedCF uint32
+	p.SetHealthPersistence(func(url string, ema float64, consecutiveFails uint32, totalQueries uint64) {
+		savedURL = url
+		savedCF = consecutiveFails
+	})
+
+	p.RecordLatency("https://up.example.com", 50.0)
+	// The callback is called in a goroutine; give it a moment.
+	time.Sleep(10 * time.Millisecond)
+
+	if savedURL != "https://up.example.com" {
+		t.Errorf("savedURL = %q, want https://up.example.com", savedURL)
+	}
+	if savedCF != 0 {
+		t.Errorf("consecutiveFails = %d, want 0", savedCF)
 	}
 }

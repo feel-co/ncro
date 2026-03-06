@@ -86,6 +86,23 @@ func main() {
 
 	p := prober.New(cfg.Cache.LatencyAlpha)
 	p.InitUpstreams(cfg.Upstreams)
+
+	// Seed prober with persisted health data from the previous run.
+	if rows, err := db.LoadAllHealth(); err == nil {
+		for _, row := range rows {
+			p.Seed(row.URL, row.EMALatency, row.ConsecutiveFails, int64(row.TotalQueries))
+		}
+	} else {
+		slog.Warn("failed to load persisted health data", "error", err)
+	}
+
+	// Persist health updates to SQLite.
+	p.SetHealthPersistence(func(url string, ema float64, cf uint32, tq uint64) {
+		if err := db.SaveHealth(url, ema, int(cf), int64(tq)); err != nil {
+			slog.Warn("failed to save health", "url", url, "error", err)
+		}
+	})
+
 	for _, u := range cfg.Upstreams {
 		go p.ProbeUpstream(u.URL)
 	}

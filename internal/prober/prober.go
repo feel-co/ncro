@@ -43,10 +43,11 @@ type UpstreamHealth struct {
 
 // Tracks latency and health for a set of upstreams.
 type Prober struct {
-	mu     sync.RWMutex
-	alpha  float64
-	table  map[string]*UpstreamHealth
-	client *http.Client
+	mu            sync.RWMutex
+	alpha         float64
+	table         map[string]*UpstreamHealth
+	client        *http.Client
+	persistHealth func(url string, ema float64, consecutiveFails uint32, totalQueries uint64)
 }
 
 // Creates a Prober with the given EMA alpha coefficient.
@@ -71,6 +72,42 @@ func (p *Prober) InitUpstreams(upstreams []config.UpstreamConfig) {
 	}
 }
 
+// Derives Status from the number of consecutive failures, matching the logic
+// in RecordFailure.
+func computeStatus(consecutiveFails uint32) Status {
+	switch {
+	case consecutiveFails >= 10:
+		return StatusDown
+	case consecutiveFails >= 3:
+		return StatusDegraded
+	default:
+		return StatusActive
+	}
+}
+
+// Seeds an upstream's health state from persisted data. Should be called
+// after InitUpstreams to restore state from the previous run.
+func (p *Prober) Seed(url string, emaLatency float64, consecutiveFails int, totalQueries int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h, ok := p.table[url]
+	if !ok {
+		return
+	}
+	h.EMALatency = emaLatency
+	h.TotalQueries = uint64(totalQueries)
+	h.ConsecutiveFails = uint32(consecutiveFails)
+	h.Status = computeStatus(uint32(consecutiveFails))
+}
+
+// Registers a callback invoked after each RecordLatency or RecordFailure call.
+// The callback runs in a separate goroutine and must be safe for concurrent use.
+func (p *Prober) SetHealthPersistence(fn func(url string, ema float64, consecutiveFails uint32, totalQueries uint64)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.persistHealth = fn
+}
+
 // Records a successful latency measurement and updates the EMA.
 func (p *Prober) RecordLatency(url string, ms float64) {
 	p.mu.Lock()
@@ -85,6 +122,11 @@ func (p *Prober) RecordLatency(url string, ms float64) {
 	h.TotalQueries++
 	h.Status = StatusActive
 	h.LastProbe = time.Now()
+	if p.persistHealth != nil {
+		u, ema, cf, tq := h.URL, h.EMALatency, h.ConsecutiveFails, h.TotalQueries
+		fn := p.persistHealth
+		go fn(u, ema, cf, tq)
+	}
 }
 
 // Records a probe failure.
@@ -98,6 +140,11 @@ func (p *Prober) RecordFailure(url string) {
 		h.Status = StatusDown
 	case h.ConsecutiveFails >= 3:
 		h.Status = StatusDegraded
+	}
+	if p.persistHealth != nil {
+		u, ema, cf, tq := h.URL, h.EMALatency, h.ConsecutiveFails, h.TotalQueries
+		fn := p.persistHealth
+		go fn(u, ema, cf, tq)
 	}
 }
 
