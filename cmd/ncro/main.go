@@ -10,8 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"notashelf.dev/ncro/internal/cache"
 	"notashelf.dev/ncro/internal/config"
+	"notashelf.dev/ncro/internal/mesh"
+	"notashelf.dev/ncro/internal/metrics"
 	"notashelf.dev/ncro/internal/prober"
 	"notashelf.dev/ncro/internal/router"
 	"notashelf.dev/ncro/internal/server"
@@ -24,6 +27,10 @@ func main() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid config", "error", err)
 		os.Exit(1)
 	}
 
@@ -43,6 +50,8 @@ func main() {
 		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
 	}
 	slog.SetDefault(slog.New(handler))
+
+	metrics.Register(prometheus.DefaultRegisterer)
 
 	db, err := cache.Open(cfg.Cache.DBPath, cfg.Cache.MaxEntries)
 	if err != nil {
@@ -68,17 +77,23 @@ func main() {
 	}()
 
 	p := prober.New(cfg.Cache.LatencyAlpha)
-	upstreamURLs := make([]string, len(cfg.Upstreams))
-	for i, u := range cfg.Upstreams {
-		upstreamURLs[i] = u.URL
-	}
-	p.InitUpstreams(upstreamURLs)
-	for _, u := range upstreamURLs {
-		go p.ProbeUpstream(u)
+	p.InitUpstreams(cfg.Upstreams)
+	for _, u := range cfg.Upstreams {
+		go p.ProbeUpstream(u.URL)
 	}
 
 	probeDone := make(chan struct{})
 	go p.RunProbeLoop(30*time.Second, probeDone)
+
+	if cfg.Mesh.Enabled {
+		node, err := mesh.NewNode(cfg.Mesh.PrivateKeyPath, nil)
+		if err != nil {
+			slog.Error("failed to create mesh node", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("mesh enabled", "node_id", node.ID(), "peers", len(cfg.Mesh.Peers))
+		slog.Warn("mesh gossip not yet implemented")
+	}
 
 	r := router.New(db, p, cfg.Cache.TTL.Duration, 5*time.Second)
 	srv := &http.Server{
