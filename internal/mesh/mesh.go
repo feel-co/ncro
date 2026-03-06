@@ -18,9 +18,7 @@ import (
 type MsgType uint8
 
 const (
-	MsgAnnounce    MsgType = 1
-	MsgSyncRequest MsgType = 2
-	MsgSyncReply   MsgType = 3
+	MsgAnnounce MsgType = 1
 )
 
 // Wire format for gossip messages.

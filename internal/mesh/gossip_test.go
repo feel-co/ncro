@@ -60,7 +60,7 @@ func TestAnnounceAndReceive(t *testing.T) {
 func TestRejectUnknownSender(t *testing.T) {
 	store := mesh.NewRouteStore()
 
-	// Listener node — will reject messages not from trusted
+	// Listener node, this'll reject messages not from trusted
 	trusted, err := mesh.NewNode("", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestRejectUnknownSender(t *testing.T) {
 }
 
 func TestRejectTamperedMessage(t *testing.T) {
-	// This is covered by TestVerifyFailsOnTamper in mesh_test.go at the crypto level.
+	// This is covered by TestVerifyFailsOnTamper the mesh tests on the crypto level.
 	// Here we verify the full pipeline rejects a re-signed-but-tampered body.
 	store := mesh.NewRouteStore()
 	node, err := mesh.NewNode("", store)

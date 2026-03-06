@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	maxPacketSize = 65536                                 // UDP max payload
+	maxPacketSize = 65536                                         // UDP max payload
 	headerSize    = ed25519.PublicKeySize + ed25519.SignatureSize // 32 + 64 = 96
 )
 
