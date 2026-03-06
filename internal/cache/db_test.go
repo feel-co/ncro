@@ -219,13 +219,24 @@ func TestNegativeCacheExpiry(t *testing.T) {
 	if err := db.SetNegative("expires-now", -time.Second); err != nil {
 		t.Fatalf("SetNegative: %v", err)
 	}
+
+	// IsNegative must filter expired entries via the inline SQL predicate,
+	// even before ExpireNegatives cleans them up.
+	neg, err := db.IsNegative("expires-now")
+	if err != nil {
+		t.Fatalf("IsNegative for expired entry: %v", err)
+	}
+	if neg {
+		t.Error("IsNegative should return false for an already-expired entry (SQL time predicate)")
+	}
+
+	// Janitor cleanup should also work.
 	if err := db.ExpireNegatives(); err != nil {
 		t.Fatalf("ExpireNegatives: %v", err)
 	}
-
-	neg, _ := db.IsNegative("expires-now")
+	neg, _ = db.IsNegative("expires-now")
 	if neg {
-		t.Error("expired negative should not be returned")
+		t.Error("expired negative should not be returned after ExpireNegatives")
 	}
 }
 
