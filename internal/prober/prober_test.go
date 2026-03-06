@@ -3,8 +3,8 @@ package prober_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
-	"time"
 
 	"notashelf.dev/ncro/internal/config"
 	"notashelf.dev/ncro/internal/prober"
@@ -146,21 +146,33 @@ func TestPersistenceCallbackFired(t *testing.T) {
 	p := prober.New(0.3)
 	p.InitUpstreams([]config.UpstreamConfig{{URL: "https://up.example.com"}})
 
-	var savedURL string
-	var savedCF uint32
+	var (
+		mu       sync.Mutex
+		savedURL string
+		savedCF  uint32
+		wg       sync.WaitGroup
+	)
+	wg.Add(1)
 	p.SetHealthPersistence(func(url string, ema float64, consecutiveFails uint32, totalQueries uint64) {
+		mu.Lock()
 		savedURL = url
 		savedCF = consecutiveFails
+		mu.Unlock()
+		wg.Done()
 	})
 
 	p.RecordLatency("https://up.example.com", 50.0)
-	// The callback is called in a goroutine; give it a moment.
-	time.Sleep(10 * time.Millisecond)
+	wg.Wait()
 
-	if savedURL != "https://up.example.com" {
-		t.Errorf("savedURL = %q, want https://up.example.com", savedURL)
+	mu.Lock()
+	gotURL := savedURL
+	gotCF := savedCF
+	mu.Unlock()
+
+	if gotURL != "https://up.example.com" {
+		t.Errorf("savedURL = %q, want https://up.example.com", gotURL)
 	}
-	if savedCF != 0 {
-		t.Errorf("consecutiveFails = %d, want 0", savedCF)
+	if gotCF != 0 {
+		t.Errorf("consecutiveFails = %d, want 0", gotCF)
 	}
 }
