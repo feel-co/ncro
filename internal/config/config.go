@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -37,7 +39,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 type UpstreamConfig struct {
 	URL       string `yaml:"url"`
 	Priority  int    `yaml:"priority"`
-	PublicKey string `yaml:"public_key"`
+	PublicKey string `yaml:"public_key"` // Nix signing key "name:base64(key)"
 }
 
 type ServerConfig struct {
@@ -53,12 +55,18 @@ type CacheConfig struct {
 	LatencyAlpha float64  `yaml:"latency_alpha"`
 }
 
+// Mesh peer with its ed25519 public key for gossip message verification.
+type PeerConfig struct {
+	Addr      string `yaml:"addr"`
+	PublicKey string `yaml:"public_key"` // hex-encoded ed25519 public key (32 bytes)
+}
+
 type MeshConfig struct {
-	Enabled        bool     `yaml:"enabled"`
-	BindAddr       string   `yaml:"bind_addr"`
-	Peers          []string `yaml:"peers"`
-	PrivateKeyPath string   `yaml:"private_key"`
-	GossipInterval Duration `yaml:"gossip_interval"`
+	Enabled        bool         `yaml:"enabled"`
+	BindAddr       string       `yaml:"bind_addr"`
+	Peers          []PeerConfig `yaml:"peers"`
+	PrivateKeyPath string       `yaml:"private_key"`
+	GossipInterval Duration     `yaml:"gossip_interval"`
 }
 
 type LoggingConfig struct {
@@ -113,6 +121,9 @@ func (c *Config) Validate() error {
 		if _, err := url.ParseRequestURI(u.URL); err != nil {
 			return fmt.Errorf("upstream[%d]: invalid URL %q: %w", i, u.URL, err)
 		}
+		if u.PublicKey != "" && !strings.Contains(u.PublicKey, ":") {
+			return fmt.Errorf("upstream[%d]: public_key must be in 'name:base64(key)' Nix format", i)
+		}
 	}
 	if c.Server.Listen == "" {
 		return fmt.Errorf("server.listen is empty")
@@ -128,6 +139,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Mesh.Enabled && len(c.Mesh.Peers) == 0 {
 		return fmt.Errorf("mesh.enabled is true but no peers configured")
+	}
+	for i, peer := range c.Mesh.Peers {
+		if peer.Addr == "" {
+			return fmt.Errorf("mesh.peers[%d]: addr is empty", i)
+		}
+		if peer.PublicKey != "" {
+			b, err := hex.DecodeString(peer.PublicKey)
+			if err != nil || len(b) != 32 {
+				return fmt.Errorf("mesh.peers[%d]: public_key must be a hex-encoded 32-byte ed25519 key", i)
+			}
+		}
 	}
 	return nil
 }
