@@ -33,22 +33,37 @@ type Result struct {
 
 // Resolves store paths to the best upstream via cache lookup or parallel racing.
 type Router struct {
-	db          *cache.DB
-	prober      *prober.Prober
-	routeTTL    time.Duration
-	raceTimeout time.Duration
-	client      *http.Client
+	db           *cache.DB
+	prober       *prober.Prober
+	routeTTL     time.Duration
+	raceTimeout  time.Duration
+	client       *http.Client
+	mu           sync.RWMutex
+	upstreamKeys map[string]string // upstream URL → Nix public key string
 }
 
 // Creates a Router.
 func New(db *cache.DB, p *prober.Prober, routeTTL, raceTimeout time.Duration) *Router {
 	return &Router{
-		db:          db,
-		prober:      p,
-		routeTTL:    routeTTL,
-		raceTimeout: raceTimeout,
-		client:      &http.Client{Timeout: raceTimeout},
+		db:           db,
+		prober:       p,
+		routeTTL:     routeTTL,
+		raceTimeout:  raceTimeout,
+		client:       &http.Client{Timeout: raceTimeout},
+		upstreamKeys: make(map[string]string),
 	}
+}
+
+// Registers a Nix public key for narinfo signature verification on a given upstream.
+// pubKeyStr must be in "name:base64(key)" format (e.g. "cache.nixos.org-1:...").
+func (r *Router) SetUpstreamKey(url, pubKeyStr string) error {
+	if _, _, err := narinfo.ParsePublicKey(pubKeyStr); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.upstreamKeys[url] = pubKeyStr
+	r.mu.Unlock()
+	return nil
 }
 
 // Returns the best upstream for the given store hash.
@@ -179,8 +194,9 @@ func (r *Router) race(storeHash string, candidates []string) (*Result, error) {
 	return &Result{URL: winner.url, LatencyMs: winner.latencyMs, NarInfoBytes: narInfoBytes}, nil
 }
 
-// Fetches narinfo content from upstream and parses metadata.
-// Returns (body, narHash, narSize); body may be non-nil even on parse error.
+// Fetches narinfo content from upstream, verifies its signature if a key is
+// configured for that upstream, and returns (body, narHash, narSize).
+// Returns (nil, "", 0) if the fetch fails or signature verification fails.
 func (r *Router) fetchNarInfo(upstream, storeHash string) ([]byte, string, uint64) {
 	url := upstream + "/" + storeHash + ".narinfo"
 	resp, err := r.client.Get(url)
@@ -198,6 +214,20 @@ func (r *Router) fetchNarInfo(upstream, storeHash string) ([]byte, string, uint6
 	ni, err := narinfo.Parse(bytes.NewReader(body))
 	if err != nil {
 		return body, "", 0
+	}
+	r.mu.RLock()
+	pubKeyStr := r.upstreamKeys[upstream]
+	r.mu.RUnlock()
+	if pubKeyStr != "" {
+		ok, err := ni.Verify(pubKeyStr)
+		if err != nil {
+			slog.Warn("narinfo: public key parse error", "upstream", upstream, "error", err)
+			return nil, "", 0
+		}
+		if !ok {
+			slog.Warn("narinfo: signature verification failed", "upstream", upstream, "store", storeHash)
+			return nil, "", 0
+		}
 	}
 	return body, ni.NarHash, ni.NarSize
 }
