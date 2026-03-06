@@ -149,6 +149,27 @@ func TestValidateMeshEnabledNoPeers(t *testing.T) {
 	}
 }
 
+func TestValidateMeshBadPeerKey(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Mesh.Enabled = true
+	cfg.Mesh.Peers = []config.PeerConfig{
+		{Addr: "127.0.0.1:7946", PublicKey: "not-hex!"},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for invalid mesh peer public key")
+	}
+}
+
+func TestValidateUpstreamBadPublicKey(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Upstreams = []config.UpstreamConfig{
+		{URL: "https://cache.nixos.org", PublicKey: "no-colon-here"},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for upstream public_key missing ':'")
+	}
+}
+
 func TestInvalidDuration(t *testing.T) {
 	yamlContent := `
 server:
