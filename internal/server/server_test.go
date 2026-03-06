@@ -309,16 +309,21 @@ func TestNARRoutingUsesCache(t *testing.T) {
 	}))
 	defer upstreamB.Close()
 
-	db, _ := cache.Open(":memory:", 100)
+	db, err := cache.Open(":memory:", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer db.Close()
 
 	// Pre-seed the route cache: abc123 → upstreamA, NarURL = "nar/abc123.nar.xz"
-	_ = db.SetRoute(&cache.RouteEntry{
+	if err := db.SetRoute(&cache.RouteEntry{
 		StorePath:   "abc123",
 		UpstreamURL: upstreamA.URL,
 		NarURL:      "nar/abc123.nar.xz",
 		TTL:         time.Now().Add(time.Hour),
-	})
+	}); err != nil {
+		t.Fatalf("SetRoute: %v", err)
+	}
 
 	p := prober.New(0.3)
 	p.InitUpstreams([]config.UpstreamConfig{{URL: upstreamA.URL}, {URL: upstreamB.URL}})
