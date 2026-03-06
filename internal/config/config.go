@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -46,10 +47,10 @@ type ServerConfig struct {
 }
 
 type CacheConfig struct {
-	DBPath       string  `yaml:"db_path"`
-	MaxEntries   int     `yaml:"max_entries"`
+	DBPath       string   `yaml:"db_path"`
+	MaxEntries   int      `yaml:"max_entries"`
 	TTL          Duration `yaml:"ttl"`
-	LatencyAlpha float64 `yaml:"latency_alpha"`
+	LatencyAlpha float64  `yaml:"latency_alpha"`
 }
 
 type MeshConfig struct {
@@ -98,6 +99,37 @@ func defaults() Config {
 			Format: "json",
 		},
 	}
+}
+
+// Validates config fields. Call after Load.
+func (c *Config) Validate() error {
+	if len(c.Upstreams) == 0 {
+		return fmt.Errorf("at least one upstream is required")
+	}
+	for i, u := range c.Upstreams {
+		if u.URL == "" {
+			return fmt.Errorf("upstream[%d]: URL is empty", i)
+		}
+		if _, err := url.ParseRequestURI(u.URL); err != nil {
+			return fmt.Errorf("upstream[%d]: invalid URL %q: %w", i, u.URL, err)
+		}
+	}
+	if c.Server.Listen == "" {
+		return fmt.Errorf("server.listen is empty")
+	}
+	if c.Cache.LatencyAlpha <= 0 || c.Cache.LatencyAlpha >= 1 {
+		return fmt.Errorf("cache.latency_alpha must be between 0 and 1 exclusive, got %f", c.Cache.LatencyAlpha)
+	}
+	if c.Cache.TTL.Duration <= 0 {
+		return fmt.Errorf("cache.ttl must be positive")
+	}
+	if c.Cache.MaxEntries <= 0 {
+		return fmt.Errorf("cache.max_entries must be positive")
+	}
+	if c.Mesh.Enabled && len(c.Mesh.Peers) == 0 {
+		return fmt.Errorf("mesh.enabled is true but no peers configured")
+	}
+	return nil
 }
 
 // Loads config from file (if non-empty) and applies env overrides.

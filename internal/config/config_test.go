@@ -97,6 +97,58 @@ mesh:
 	}
 }
 
+func TestValidateValid(t *testing.T) {
+	cfg, _ := config.Load("")
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("default config should be valid: %v", err)
+	}
+}
+
+func TestValidateNoUpstreams(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Upstreams = nil
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for no upstreams")
+	}
+}
+
+func TestValidateBadURL(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Upstreams = []config.UpstreamConfig{{URL: "not-a-url"}}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for invalid URL")
+	}
+}
+
+func TestValidateBadAlpha(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Cache.LatencyAlpha = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for alpha=0")
+	}
+	cfg.Cache.LatencyAlpha = 1
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for alpha=1")
+	}
+}
+
+func TestValidateNegativeTTL(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Cache.TTL = config.Duration{}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for zero TTL")
+	}
+}
+
+func TestValidateMeshEnabledNoPeers(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Mesh.Enabled = true
+	cfg.Mesh.Peers = nil
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for mesh enabled without peers")
+	}
+}
+
 func TestInvalidDuration(t *testing.T) {
 	yamlContent := `
 server:
