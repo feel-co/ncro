@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"notashelf.dev/ncro/internal/cache"
+	"notashelf.dev/ncro/internal/config"
 	"notashelf.dev/ncro/internal/prober"
 	"notashelf.dev/ncro/internal/router"
 )
@@ -26,7 +29,7 @@ func newTestRouter(t *testing.T, upstreams ...string) (*router.Router, func()) {
 	for _, u := range upstreams {
 		p.RecordLatency(u, 10)
 	}
-	r := router.New(db, p, time.Hour, 5*time.Second)
+	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
 	return r, func() {
 		db.Close()
 		os.Remove(f.Name())
@@ -162,7 +165,7 @@ func TestResolveWithDownUpstream(t *testing.T) {
 		p.RecordFailure(srv.URL)
 	}
 
-	r := router.New(db, p, time.Hour, 5*time.Second)
+	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
 	// Router should still attempt the race (the race uses HEAD, not the prober status)
 	// The upstream is actually healthy (httptest), so the race should succeed.
 	result, err := r.Resolve("somehash", []string{srv.URL})
@@ -171,5 +174,45 @@ func TestResolveWithDownUpstream(t *testing.T) {
 	}
 	if result.URL != srv.URL {
 		t.Errorf("url = %q", result.URL)
+	}
+}
+
+func TestSingleflightDedup(t *testing.T) {
+	var headCount, getCount int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			atomic.AddInt32(&headCount, 1)
+			time.Sleep(30 * time.Millisecond) // ensure goroutines overlap
+			w.WriteHeader(http.StatusOK)
+		} else {
+			atomic.AddInt32(&getCount, 1)
+			w.Header().Set("Content-Type", "text/x-nix-narinfo")
+			fmt.Fprintln(w, "StorePath: /nix/store/abc123-test")
+		}
+	}))
+	defer ts.Close()
+
+	db, err := cache.Open(":memory:", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	p := prober.New(0.3)
+	p.InitUpstreams([]config.UpstreamConfig{{URL: ts.URL}})
+	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
+
+	const N = 10
+	var wg sync.WaitGroup
+	for range N {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Resolve("abc123dedup", []string{ts.URL})
+		}()
+	}
+	wg.Wait()
+
+	if hc := atomic.LoadInt32(&headCount); hc > 1 {
+		t.Errorf("upstream HEAD hit %d times for %d concurrent callers; want 1", hc, N)
 	}
 }

@@ -39,7 +39,7 @@ func makeTestServer(t *testing.T, upstreams ...string) *httptest.Server {
 		upsCfg[i] = config.UpstreamConfig{URL: u}
 	}
 
-	r := router.New(db, p, time.Hour, 5*time.Second)
+	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
 	return httptest.NewServer(server.New(r, p, upsCfg))
 }
 
@@ -311,7 +311,7 @@ func TestNARFallbackWhenFirstUpstreamMissing(t *testing.T) {
 	p.RecordLatency(hasIt.URL, 50)
 
 	upsCfg := []config.UpstreamConfig{{URL: missing.URL}, {URL: hasIt.URL}}
-	r := router.New(db, p, time.Hour, 5*time.Second)
+	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
 	ts := httptest.NewServer(server.New(r, p, upsCfg))
 	defer ts.Close()
 

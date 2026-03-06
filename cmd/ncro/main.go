@@ -90,7 +90,7 @@ func main() {
 	probeDone := make(chan struct{})
 	go p.RunProbeLoop(30*time.Second, probeDone)
 
-	r := router.New(db, p, cfg.Cache.TTL.Duration, 5*time.Second)
+	r := router.New(db, p, cfg.Cache.TTL.Duration, 5*time.Second, 10*time.Minute)
 	for _, u := range cfg.Upstreams {
 		if u.PublicKey != "" {
 			if err := r.SetUpstreamKey(u.URL, u.PublicKey); err != nil {

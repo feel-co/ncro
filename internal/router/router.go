@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"notashelf.dev/ncro/internal/cache"
 	"notashelf.dev/ncro/internal/metrics"
 	"notashelf.dev/ncro/internal/narinfo"
@@ -37,18 +38,21 @@ type Router struct {
 	prober       *prober.Prober
 	routeTTL     time.Duration
 	raceTimeout  time.Duration
+	negativeTTL  time.Duration
 	client       *http.Client
 	mu           sync.RWMutex
 	upstreamKeys map[string]string // upstream URL → Nix public key string
+	group        singleflight.Group
 }
 
 // Creates a Router.
-func New(db *cache.DB, p *prober.Prober, routeTTL, raceTimeout time.Duration) *Router {
+func New(db *cache.DB, p *prober.Prober, routeTTL, raceTimeout, negativeTTL time.Duration) *Router {
 	return &Router{
 		db:           db,
 		prober:       p,
 		routeTTL:     routeTTL,
 		raceTimeout:  raceTimeout,
+		negativeTTL:  negativeTTL,
 		client:       &http.Client{Timeout: raceTimeout},
 		upstreamKeys: make(map[string]string),
 	}
@@ -82,7 +86,14 @@ func (r *Router) Resolve(storeHash string, candidates []string) (*Result, error)
 		}
 	}
 	metrics.NarinfoCacheMisses.Inc()
-	return r.race(storeHash, candidates)
+
+	v, raceErr, _ := r.group.Do(storeHash, func() (interface{}, error) {
+		return r.race(storeHash, candidates)
+	})
+	if raceErr != nil {
+		return nil, raceErr
+	}
+	return v.(*Result), nil
 }
 
 type raceResult struct {
