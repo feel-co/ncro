@@ -3,6 +3,8 @@ package cache
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,7 +38,13 @@ type DB struct {
 }
 
 // Opens or creates the SQLite database at path with WAL mode.
+// Creates parent directories as needed (unless path is ":memory:").
 func Open(path string, maxEntries int) (*DB, error) {
+	if path != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, fmt.Errorf("create db dir: %w", err)
+		}
+	}
 	db, err := sql.Open("sqlite", path+"?_journal=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
