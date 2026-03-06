@@ -41,7 +41,7 @@ type Router struct {
 	negativeTTL  time.Duration
 	client       *http.Client
 	mu           sync.RWMutex
-	upstreamKeys map[string]string // upstream URL → Nix public key string
+	upstreamKeys map[string]string // upstream URL -> Nix public key string
 	group        singleflight.Group
 }
 
@@ -73,6 +73,12 @@ func (r *Router) SetUpstreamKey(url, pubKeyStr string) error {
 // Returns the best upstream for the given store hash.
 // Checks the route cache first; on miss races the provided candidates.
 func (r *Router) Resolve(storeHash string, candidates []string) (*Result, error) {
+	// Fast path: negative cache.
+	if neg, err := r.db.IsNegative(storeHash); err == nil && neg {
+		return nil, ErrNotFound
+	}
+
+	// Fast path: route cache hit.
 	entry, err := r.db.GetRoute(storeHash)
 	if err == nil && entry != nil && entry.IsValid() {
 		h := r.prober.GetHealth(entry.UpstreamURL)
@@ -88,7 +94,14 @@ func (r *Router) Resolve(storeHash string, candidates []string) (*Result, error)
 	metrics.NarinfoCacheMisses.Inc()
 
 	v, raceErr, _ := r.group.Do(storeHash, func() (interface{}, error) {
-		return r.race(storeHash, candidates)
+		result, err := r.race(storeHash, candidates)
+		if errors.Is(err, ErrNotFound) {
+			_ = r.db.SetNegative(storeHash, r.negativeTTL)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
 	})
 	if raceErr != nil {
 		return nil, raceErr

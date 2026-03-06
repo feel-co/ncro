@@ -180,6 +180,55 @@ func TestRouteCountAfterExpiry(t *testing.T) {
 	}
 }
 
+func TestNegativeCacheSetAndCheck(t *testing.T) {
+	db, err := cache.Open(":memory:", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	neg, err := db.IsNegative("missing-path")
+	if err != nil {
+		t.Fatalf("IsNegative: %v", err)
+	}
+	if neg {
+		t.Error("expected false for unknown path")
+	}
+
+	if err := db.SetNegative("missing-path", 10*time.Minute); err != nil {
+		t.Fatalf("SetNegative: %v", err)
+	}
+
+	neg, err = db.IsNegative("missing-path")
+	if err != nil {
+		t.Fatalf("IsNegative after set: %v", err)
+	}
+	if !neg {
+		t.Error("expected true after SetNegative")
+	}
+}
+
+func TestNegativeCacheExpiry(t *testing.T) {
+	db, err := cache.Open(":memory:", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Set with negative duration so it's already expired.
+	if err := db.SetNegative("expires-now", -time.Second); err != nil {
+		t.Fatalf("SetNegative: %v", err)
+	}
+	if err := db.ExpireNegatives(); err != nil {
+		t.Fatalf("ExpireNegatives: %v", err)
+	}
+
+	neg, _ := db.IsNegative("expires-now")
+	if neg {
+		t.Error("expired negative should not be returned")
+	}
+}
+
 func TestLRUEviction(t *testing.T) {
 	// Use maxEntries=3 to trigger eviction easily
 	f, _ := os.CreateTemp("", "ncro-lru-*.db")

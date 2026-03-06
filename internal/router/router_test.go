@@ -177,6 +177,40 @@ func TestResolveWithDownUpstream(t *testing.T) {
 	}
 }
 
+func TestNegativeCaching(t *testing.T) {
+	var raceCount int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&raceCount, 1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	db, err := cache.Open(":memory:", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	p := prober.New(0.3)
+	p.InitUpstreams([]config.UpstreamConfig{{URL: ts.URL}})
+	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
+
+	_, err = r.Resolve("not-on-any-upstream", []string{ts.URL})
+	if !errors.Is(err, router.ErrNotFound) {
+		t.Fatalf("first resolve: expected ErrNotFound, got %v", err)
+	}
+	count1 := atomic.LoadInt32(&raceCount)
+
+	_, err = r.Resolve("not-on-any-upstream", []string{ts.URL})
+	if !errors.Is(err, router.ErrNotFound) {
+		t.Fatalf("second resolve: expected ErrNotFound, got %v", err)
+	}
+	count2 := atomic.LoadInt32(&raceCount)
+
+	if count2 != count1 {
+		t.Errorf("second resolve hit upstream %d extra times, want 0 (should be negatively cached)", count2-count1)
+	}
+}
+
 func TestSingleflightDedup(t *testing.T) {
 	var headCount int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

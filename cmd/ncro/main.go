@@ -74,6 +74,9 @@ func main() {
 				if err := db.ExpireOldRoutes(); err != nil {
 					slog.Warn("expire routes error", "error", err)
 				}
+				if err := db.ExpireNegatives(); err != nil {
+					slog.Warn("expire negatives error", "error", err)
+				}
 				if count, err := db.RouteCount(); err == nil {
 					metrics.RouteEntries.Set(float64(count))
 				}
@@ -90,7 +93,7 @@ func main() {
 	probeDone := make(chan struct{})
 	go p.RunProbeLoop(30*time.Second, probeDone)
 
-	r := router.New(db, p, cfg.Cache.TTL.Duration, 5*time.Second, 10*time.Minute)
+	r := router.New(db, p, cfg.Cache.TTL.Duration, 5*time.Second, cfg.Cache.NegativeTTL.Duration)
 	for _, u := range cfg.Upstreams {
 		if u.PublicKey != "" {
 			if err := r.SetUpstreamKey(u.URL, u.PublicKey); err != nil {

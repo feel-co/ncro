@@ -132,11 +132,19 @@ func TestValidateBadAlpha(t *testing.T) {
 	}
 }
 
-func TestValidateNegativeTTL(t *testing.T) {
+func TestValidateZeroTTL(t *testing.T) {
 	cfg, _ := config.Load("")
 	cfg.Cache.TTL = config.Duration{}
 	if err := cfg.Validate(); err == nil {
 		t.Error("expected error for zero TTL")
+	}
+}
+
+func TestValidateNegativeTTL(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Cache.NegativeTTL = config.Duration{}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for zero negative_ttl")
 	}
 }
 

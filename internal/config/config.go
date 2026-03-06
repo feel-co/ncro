@@ -52,6 +52,7 @@ type CacheConfig struct {
 	DBPath       string   `yaml:"db_path"`
 	MaxEntries   int      `yaml:"max_entries"`
 	TTL          Duration `yaml:"ttl"`
+	NegativeTTL  Duration `yaml:"negative_ttl"`
 	LatencyAlpha float64  `yaml:"latency_alpha"`
 }
 
@@ -96,6 +97,7 @@ func defaults() Config {
 			DBPath:       "/var/lib/ncro/routes.db",
 			MaxEntries:   100000,
 			TTL:          Duration{time.Hour},
+			NegativeTTL:  Duration{10 * time.Minute},
 			LatencyAlpha: 0.3,
 		},
 		Mesh: MeshConfig{
@@ -133,6 +135,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Cache.TTL.Duration <= 0 {
 		return fmt.Errorf("cache.ttl must be positive")
+	}
+	if c.Cache.NegativeTTL.Duration <= 0 {
+		return fmt.Errorf("cache.negative_ttl must be positive")
 	}
 	if c.Cache.MaxEntries <= 0 {
 		return fmt.Errorf("cache.max_entries must be positive")

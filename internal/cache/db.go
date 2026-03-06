@@ -80,6 +80,11 @@ func migrate(db *sql.DB) error {
 			total_queries      INTEGER DEFAULT 0,
 			success_rate       REAL DEFAULT 1.0
 		);
+		CREATE TABLE IF NOT EXISTS negative_cache (
+			store_path TEXT PRIMARY KEY,
+			expires_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_negative_expires ON negative_cache(expires_at);
 	`)
 	return err
 }
@@ -176,6 +181,32 @@ func (d *DB) RouteCount() (int, error) {
 	var count int
 	err := d.db.QueryRow(`SELECT COUNT(*) FROM routes`).Scan(&count)
 	return count, err
+}
+
+// Records a negative cache entry for storePath with the given TTL.
+func (d *DB) SetNegative(storePath string, ttl time.Duration) error {
+	_, err := d.db.Exec(
+		`INSERT INTO negative_cache (store_path, expires_at) VALUES (?, ?)
+		 ON CONFLICT(store_path) DO UPDATE SET expires_at = excluded.expires_at`,
+		storePath, time.Now().Add(ttl).Unix(),
+	)
+	return err
+}
+
+// Returns true if a non-expired negative entry exists for storePath.
+func (d *DB) IsNegative(storePath string) (bool, error) {
+	var count int
+	err := d.db.QueryRow(
+		`SELECT COUNT(*) FROM negative_cache WHERE store_path = ? AND expires_at > ?`,
+		storePath, time.Now().Unix(),
+	).Scan(&count)
+	return count > 0, err
+}
+
+// Deletes expired negative cache entries.
+func (d *DB) ExpireNegatives() error {
+	_, err := d.db.Exec(`DELETE FROM negative_cache WHERE expires_at < ?`, time.Now().Unix())
+	return err
 }
 
 // Deletes the oldest routes (by last_verified) when over capacity.
