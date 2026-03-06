@@ -39,7 +39,7 @@ func TestRouteReuseOnSecondRequest(t *testing.T) {
 	p := prober.New(0.3)
 	p.RecordLatency(upstream.URL, 10)
 	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
-	ts := httptest.NewServer(server.New(r, p, []config.UpstreamConfig{{URL: upstream.URL}}))
+	ts := httptest.NewServer(server.New(r, p, db, []config.UpstreamConfig{{URL: upstream.URL}}, 30))
 	defer ts.Close()
 
 	resp1, _ := http.Get(ts.URL + "/deadbeef00000000.narinfo")
@@ -79,10 +79,10 @@ func TestUpstreamFailoverFallback(t *testing.T) {
 	p.RecordLatency(good.URL, 50)
 
 	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
-	ts := httptest.NewServer(server.New(r, p, []config.UpstreamConfig{
+	ts := httptest.NewServer(server.New(r, p, db, []config.UpstreamConfig{
 		{URL: bad.URL},
 		{URL: good.URL},
-	}))
+	}, 30))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/cafebabe00000000.narinfo")

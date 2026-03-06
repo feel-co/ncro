@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"notashelf.dev/ncro/internal/cache"
 	"notashelf.dev/ncro/internal/config"
 	"notashelf.dev/ncro/internal/metrics"
 	"notashelf.dev/ncro/internal/prober"
@@ -18,19 +19,23 @@ import (
 
 // HTTP handler implementing the Nix binary cache protocol.
 type Server struct {
-	router    *router.Router
-	prober    *prober.Prober
-	upstreams []config.UpstreamConfig
-	client    *http.Client
+	router        *router.Router
+	prober        *prober.Prober
+	db            *cache.DB
+	upstreams     []config.UpstreamConfig
+	client        *http.Client
+	cachePriority int
 }
 
 // Creates a Server.
-func New(r *router.Router, p *prober.Prober, upstreams []config.UpstreamConfig) *Server {
+func New(r *router.Router, p *prober.Prober, db *cache.DB, upstreams []config.UpstreamConfig, cachePriority int) *Server {
 	return &Server{
-		router:    r,
-		prober:    p,
-		upstreams: upstreams,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		router:        r,
+		prober:        p,
+		db:            db,
+		upstreams:     upstreams,
+		client:        &http.Client{Timeout: 60 * time.Second},
+		cachePriority: cachePriority,
 	}
 }
 
@@ -56,7 +61,7 @@ func (s *Server) handleCacheInfo(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	fmt.Fprintln(w, "StoreDir: /nix/store")
 	fmt.Fprintln(w, "WantMassQuery: 1")
-	fmt.Fprintln(w, "Priority: 30")
+	fmt.Fprintf(w, "Priority: %d\n", s.cachePriority)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -94,40 +99,55 @@ func (s *Server) handleNarinfo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleNAR(w http.ResponseWriter, r *http.Request) {
 	metrics.NARRequests.Inc()
-	sorted := s.prober.SortedByLatency()
-	if len(sorted) == 0 {
-		http.Error(w, "no upstreams available", http.StatusServiceUnavailable)
-		return
+
+	// Consult route cache: the narURL is the path without the leading slash.
+	narURL := strings.TrimPrefix(r.URL.Path, "/")
+	var tried string
+	if entry, err := s.db.GetRouteByNarURL(narURL); err == nil && entry != nil && entry.IsValid() {
+		tried = entry.UpstreamURL
+		if s.tryNARUpstream(w, r, entry.UpstreamURL) {
+			return
+		}
 	}
-	for _, h := range sorted {
-		if h.Status == prober.StatusDown {
+
+	// Fall back through all upstreams sorted by latency.
+	for _, h := range s.prober.SortedByLatency() {
+		if h.Status == prober.StatusDown || h.URL == tried {
 			continue
 		}
-		targetURL := h.URL + r.URL.Path
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
-		if err != nil {
-			continue
+		if s.tryNARUpstream(w, r, h.URL) {
+			return
 		}
-		for _, hdr := range []string{"Accept", "Accept-Encoding", "Range"} {
-			if v := r.Header.Get(hdr); v != "" {
-				req.Header.Set(hdr, v)
-			}
-		}
-		resp, err := s.client.Do(req)
-		if err != nil {
-			slog.Warn("NAR upstream failed", "upstream", h.URL, "error", err)
-			continue
-		}
-		if resp.StatusCode == http.StatusNotFound {
-			resp.Body.Close()
-			continue
-		}
-		defer resp.Body.Close()
-		slog.Debug("proxying NAR", "path", r.URL.Path, "upstream", h.URL)
-		s.copyResponse(w, resp)
-		return
 	}
 	http.NotFound(w, r)
+}
+
+// Attempts to serve a NAR from upstreamBase. Returns true if the upstream
+// responded with a non-404 status.
+func (s *Server) tryNARUpstream(w http.ResponseWriter, r *http.Request, upstreamBase string) bool {
+	targetURL := upstreamBase + r.URL.Path
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	if err != nil {
+		return false
+	}
+	for _, hdr := range []string{"Accept", "Accept-Encoding", "Range"} {
+		if v := r.Header.Get(hdr); v != "" {
+			req.Header.Set(hdr, v)
+		}
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		slog.Warn("NAR upstream failed", "upstream", upstreamBase, "error", err)
+		return false
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		return false
+	}
+	defer resp.Body.Close()
+	slog.Debug("proxying NAR", "path", r.URL.Path, "upstream", upstreamBase)
+	s.copyResponse(w, resp)
+	return true
 }
 
 // Forwards r to targetURL and streams the response zero-copy.

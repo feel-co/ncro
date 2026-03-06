@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func makeTestServer(t *testing.T, upstreams ...string) *httptest.Server {
 	}
 
 	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
-	return httptest.NewServer(server.New(r, p, upsCfg))
+	return httptest.NewServer(server.New(r, p, db, upsCfg, 30))
 }
 
 func TestNixCacheInfo(t *testing.T) {
@@ -287,6 +288,55 @@ func TestNARRangeHeaderForwarded(t *testing.T) {
 	}
 }
 
+func TestNARRoutingUsesCache(t *testing.T) {
+	// Upstream A: has the NAR.
+	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".narinfo") {
+			w.Header().Set("Content-Type", "text/x-nix-narinfo")
+			fmt.Fprintln(w, "StorePath: /nix/store/abc123-test")
+			fmt.Fprintln(w, "URL: nar/abc123.nar.xz")
+		} else {
+			fmt.Fprintln(w, "NAR data from A")
+		}
+	}))
+	defer upstreamA.Close()
+
+	// Upstream B: does NOT have the NAR.
+	var bHit int32
+	upstreamB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&bHit, 1)
+		http.NotFound(w, r)
+	}))
+	defer upstreamB.Close()
+
+	db, _ := cache.Open(":memory:", 100)
+	defer db.Close()
+
+	// Pre-seed the route cache: abc123 → upstreamA, NarURL = "nar/abc123.nar.xz"
+	_ = db.SetRoute(&cache.RouteEntry{
+		StorePath:   "abc123",
+		UpstreamURL: upstreamA.URL,
+		NarURL:      "nar/abc123.nar.xz",
+		TTL:         time.Now().Add(time.Hour),
+	})
+
+	p := prober.New(0.3)
+	p.InitUpstreams([]config.UpstreamConfig{{URL: upstreamA.URL}, {URL: upstreamB.URL}})
+	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
+	srv := server.New(r, p, db, []config.UpstreamConfig{{URL: upstreamA.URL}, {URL: upstreamB.URL}}, 30)
+
+	req := httptest.NewRequest(http.MethodGet, "/nar/abc123.nar.xz", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if atomic.LoadInt32(&bHit) > 0 {
+		t.Error("upstream B should not have been contacted when route cache has the answer")
+	}
+}
+
 func TestNARFallbackWhenFirstUpstreamMissing(t *testing.T) {
 	missing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
@@ -312,7 +362,7 @@ func TestNARFallbackWhenFirstUpstreamMissing(t *testing.T) {
 
 	upsCfg := []config.UpstreamConfig{{URL: missing.URL}, {URL: hasIt.URL}}
 	r := router.New(db, p, time.Hour, 5*time.Second, 10*time.Minute)
-	ts := httptest.NewServer(server.New(r, p, upsCfg))
+	ts := httptest.NewServer(server.New(r, p, db, upsCfg, 30))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/nar/abc123.nar")

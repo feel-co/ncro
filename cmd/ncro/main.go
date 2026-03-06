@@ -140,7 +140,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         cfg.Server.Listen,
-		Handler:      server.New(r, p, cfg.Upstreams),
+		Handler:      server.New(r, p, db, cfg.Upstreams, 30),
 		ReadTimeout:  cfg.Server.ReadTimeout.Duration,
 		WriteTimeout: cfg.Server.WriteTimeout.Duration,
 	}
