@@ -43,9 +43,10 @@ type UpstreamConfig struct {
 }
 
 type ServerConfig struct {
-	Listen       string   `yaml:"listen"`
-	ReadTimeout  Duration `yaml:"read_timeout"`
-	WriteTimeout Duration `yaml:"write_timeout"`
+	Listen        string   `yaml:"listen"`
+	ReadTimeout   Duration `yaml:"read_timeout"`
+	WriteTimeout  Duration `yaml:"write_timeout"`
+	CachePriority int      `yaml:"cache_priority"`
 }
 
 type CacheConfig struct {
@@ -86,9 +87,10 @@ type Config struct {
 func defaults() Config {
 	return Config{
 		Server: ServerConfig{
-			Listen:       ":8080",
-			ReadTimeout:  Duration{30 * time.Second},
-			WriteTimeout: Duration{30 * time.Second},
+			Listen:        ":8080",
+			ReadTimeout:   Duration{30 * time.Second},
+			WriteTimeout:  Duration{30 * time.Second},
+			CachePriority: 30,
 		},
 		Upstreams: []UpstreamConfig{
 			{URL: "https://cache.nixos.org", Priority: 10},
@@ -129,6 +131,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.Listen == "" {
 		return fmt.Errorf("server.listen is empty")
+	}
+	if c.Server.CachePriority < 1 {
+		return fmt.Errorf("server.cache_priority must be >= 1, got %d", c.Server.CachePriority)
 	}
 	if c.Cache.LatencyAlpha <= 0 || c.Cache.LatencyAlpha >= 1 {
 		return fmt.Errorf("cache.latency_alpha must be between 0 and 1 exclusive, got %f", c.Cache.LatencyAlpha)

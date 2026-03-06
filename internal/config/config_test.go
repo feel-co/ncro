@@ -178,6 +178,24 @@ func TestValidateUpstreamBadPublicKey(t *testing.T) {
 	}
 }
 
+func TestCachePriorityDefault(t *testing.T) {
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.CachePriority != 30 {
+		t.Errorf("default CachePriority = %d, want 30", cfg.Server.CachePriority)
+	}
+}
+
+func TestCachePriorityValidation(t *testing.T) {
+	cfg, _ := config.Load("")
+	cfg.Server.CachePriority = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for CachePriority = 0")
+	}
+}
+
 func TestInvalidDuration(t *testing.T) {
 	yamlContent := `
 server:
