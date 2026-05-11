@@ -3,12 +3,13 @@ members  = [ "crates/*", "ncro" ]
 resolver = "3"
 
 [workspace.package]
-description = "Nix Cache Route Optimizer"
-edition     = "2024"
-homepage    = "https://github.com/notashelf/ncro"
-license     = "EUPL-1.2"
-repository  = "https://github.com/notashelf/ncro"
-version     = "2.0.0"
+description  = "Nix Cache Route Optimizer"
+edition      = "2024"
+homepage     = "https://github.com/feel-co/ncro"
+license      = "EUPL-1.2"
+repository   = "https://github.com/feel-co/ncro"
+rust-version = "1.90.0"
+version      = "2.0.0"
 
 [workspace.dependencies]
 # Workspace components
