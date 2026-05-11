@@ -9,28 +9,6 @@ permissions:
   contents: write
 
 jobs:
-  tag-release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-
-      - name: Read version
-        run: |
-          echo -n "stash_version=v" >> "$GITHUB_ENV"
-          nix run nixpkgs#fq -- -r '.package.version' Cargo.toml >> "$GITHUB_ENV"
-          cat "$GITHUB_ENV"
-
-      - name: Tag
-        run: |
-          set -x
-          git tag $ndg_version
-          git push --tags || :
-
   create-release:
     needs: tag-release
     runs-on: ubuntu-latest
