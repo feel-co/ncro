@@ -45,8 +45,28 @@ The request flow is quite simplistic:
    directly
 5. Route is persisted with TTL; subsequent requests use the cache
 
+[architechture reference]: ./docs/architecture.md
+
 Background probes (`HEAD /nix-cache-info`) run every 30 seconds to keep latency
-measurements current and detect unhealthy upstreams.
+measurements current and detect unhealthy upstreams. You may find additional
+details on the project architecture in the [architechture reference]. .
+
+### Runtime Endpoints
+
+- `GET /nix-cache-info`: proxy capability advertisement used by Nix
+- `GET /<hash>.narinfo`: route lookup and upstream selection
+- `GET /nar/<path>.nar`: streamed NAR content from the chosen upstream
+- `GET /metrics`: Prometheus metrics
+- `GET /health`: JSON health summary of configured upstreams
+
+### Routing Notes
+
+- Route cache decisions are stored in SQLite and reused until they expire.
+- Lower latency wins; when two upstreams are within 10% of each other, the lower
+  `priority` value wins.
+- Background probes update latency even when no client traffic is flowing.
+- If an upstream is missing from the cache, ncro races all configured upstreams
+  in parallel and uses the first successful response.
 
 ## Quick Start
 
@@ -60,6 +80,14 @@ $ ncro --config /etc/ncro/config.toml
 # Tell Nix to use it
 $ nix-shell -p hello --substituters http://localhost:8080
 ```
+
+[installation document]: ./docs/install.md
+
+Deployment instructions are in [installation document].
+
+> [!TIP]
+> If you are testing locally, point only a single Nix client at ncro first. That
+> makes it easier to see cache behavior and upstream selection in logs.
 
 ## Configuration
 
@@ -104,6 +132,9 @@ gossip_interval = "30s"
 | `NCRO_LISTEN`    | `server.listen` |
 | `NCRO_DB_PATH`   | `cache.db_path` |
 | `NCRO_LOG_LEVEL` | `logging.level` |
+
+Environment overrides are useful for containerized or Systemd deployments where
+you want a fixed config file but still need to tweak one or two settings.
 
 ## NixOS Integration
 
@@ -159,6 +190,10 @@ Each peer entry takes an address and an optional ed25519 public key. When a
 public key is provided, incoming gossip packets are verified against it; packets
 from unlisted senders or with invalid signatures are silently dropped.
 
+If `mesh.private_key` is left empty, ncro generates an ephemeral identity on
+startup. That is fine for testing, but persistent gossip requires a stable key
+so peers can recognize the node across restarts.
+
 ```toml
 [mesh]
 enabled = true
@@ -173,8 +208,13 @@ addr = "100.64.1.3:7946"
 public_key = "d4e5f6..."
 ```
 
-The node logs its public key on startup (`mesh node identity` log line). You
-canshare it with peers so they can add it to their config.
+The node logs its public key on startup (`mesh node identity` log line). You can
+share it with peers so they can add it to their config.
+
+> [!TIP]
+> Keep mesh traffic on a private network. The gossip protocol is signed, but it
+> is still meant for trusted peers. ncro's mesh network feature was designed
+> with Tailscale in mind.
 
 ## Metrics
 
@@ -194,7 +234,27 @@ Prometheus metrics are available at `/metrics`.
 
 <!--markdownlint-enable MD013-->
 
-## Building
+> [!TIP]
+> If you are tuning upstreams, watch `ncro_upstream_latency_seconds` and
+> `ncro_upstream_race_wins_total` together. The first shows raw response timing;
+> the second shows which cache host is actually being chosen.
+
+## Operational Tips
+
+- Use `priority` to break ties between similarly fast caches, not to override a
+  clearly slower upstream.
+- Put `db_path` on persistent storage if you want routing decisions to survive
+  restarts.
+- Use a small `ttl` while testing and a larger one in production to reduce
+  upstream probing.
+- Keep `cache.nix.org` and any private caches in the upstream list, with the
+  most trusted cache first.
+- If you run behind a firewall or container network, make sure the listen port
+  is reachable from your Nix clients.
+
+## Hacking
+
+### Building
 
 ```bash
 # With Nix (recommended)
