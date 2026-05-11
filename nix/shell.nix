@@ -6,6 +6,7 @@
   rust-analyzer,
   rustc,
   rustfmt,
+  taplo,
 }:
 mkShell {
   name = "rust";
@@ -19,5 +20,6 @@ mkShell {
     rust-analyzer
     clippy
     (rustfmt.override {asNightly = true;})
+    taplo
   ];
 }
