@@ -1,0 +1,128 @@
+name: Publish Built Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  tag-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Read version
+        run: |
+          echo -n "stash_version=v" >> "$GITHUB_ENV"
+          nix run nixpkgs#fq -- -r '.package.version' Cargo.toml >> "$GITHUB_ENV"
+          cat "$GITHUB_ENV"
+
+      - name: Tag
+        run: |
+          set -x
+          git tag $ndg_version
+          git push --tags || :
+
+  create-release:
+    needs: tag-release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  build-release:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: stash-linux-amd64
+            cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            name: stash-linux-arm64
+            cross: true
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup cross-compilation (Linux ARM64)
+        if: matrix.cross && matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build binary (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build binary (cross)
+        if: ${{ matrix.cross }}
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary (Unix)
+        if: ${{ !contains(matrix.os, 'windows') }}
+        run: |
+          cp target/${{ matrix.target }}/release/stash ${{ matrix.name }}
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ matrix.name }}
+
+  generate-checksums:
+    needs: [create-release, build-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download Assets
+        uses: robinraju/release-downloader@v1
+        with:
+          tag: ${{ github.ref_name }}
+          fileName: "stash-*"
+          out-file-path: "."
+
+      - name: Generate checksums
+        run: |
+          sha256sum stash-* > SHA256SUMS
+
+      - name: Upload Checksums
+        uses: softprops/action-gh-release@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: SHA256SUMS
+
+
