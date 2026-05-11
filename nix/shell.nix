@@ -7,6 +7,7 @@
   rustc,
   rustfmt,
   taplo,
+  cargo-nextest,
 }:
 mkShell {
   name = "rust";
@@ -21,5 +22,7 @@ mkShell {
     clippy
     (rustfmt.override {asNightly = true;})
     taplo
+
+    cargo-nextest
   ];
 }
