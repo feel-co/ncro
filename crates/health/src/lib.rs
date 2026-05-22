@@ -5,6 +5,25 @@ use std::{
   time::{Duration, Instant},
 };
 
+/// Compute the probe interval for an upstream based on how many consecutive
+/// failures it has accumulated. Healthy upstreams probe at the base interval;
+/// degraded and down ones back off to reduce noise on dead hosts.
+///
+/// | State    | consecutive_fails | multiplier |
+/// |----------|-------------------|------------|
+/// | Active   | 0–2               | x1 (base)  |
+/// | Degraded | 3–9               | x4         |
+/// | Down     | 10+               | x10        |
+#[must_use]
+fn backoff_interval(base: Duration, consecutive_fails: u32) -> Duration {
+  let multiplier = match consecutive_fails {
+    0..=2 => 1,
+    3..=9 => 4,
+    10.. => 10,
+  };
+  base.saturating_mul(multiplier)
+}
+
 use ncro_config::UpstreamConfig;
 use tokio::sync::RwLock;
 
@@ -240,15 +259,39 @@ impl Prober {
     interval: Duration,
     mut stop: tokio::sync::watch::Receiver<bool>,
   ) {
-    let mut ticker = tokio::time::interval(interval);
+    // Check for due probes at a fraction of the base interval so newly-added
+    // upstreams and backoff expirations are picked up promptly.
+    let check_tick = (interval / 4).max(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(check_tick);
+
+    // When was it last probed. None means never, probe immediately.
+    let mut last_probed: HashMap<String, Instant> = HashMap::new();
     loop {
       tokio::select! {
           _ = stop.changed() => return,
           _ = ticker.tick() => {
-              let urls = self.inner.table.read().await.keys().cloned().collect::<Vec<_>>();
-              for url in urls {
-                  let prober = self.clone();
-                  tokio::spawn(async move { prober.probe_upstream(url).await; });
+              let now = Instant::now();
+
+              // Snapshot url + consecutive_fails
+              let entries: Vec<(String, u32)> = self
+                  .inner
+                  .table
+                  .read()
+                  .await
+                  .values()
+                  .map(|h| (h.url.clone(), h.consecutive_fails))
+                  .collect();
+              for (url, consecutive_fails) in entries {
+                  let due = backoff_interval(interval, consecutive_fails);
+                  let should_probe = match last_probed.get(&url) {
+                      None => true,
+                      Some(&last) => now.saturating_duration_since(last) >= due,
+                  };
+                  if should_probe {
+                      last_probed.insert(url.clone(), now);
+                      let prober = self.clone();
+                      tokio::spawn(async move { prober.probe_upstream(url).await; });
+                  }
               }
           }
       }
