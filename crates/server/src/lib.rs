@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
   Router as AxumRouter,
@@ -12,7 +12,7 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use ncro_config::UpstreamConfig;
 use ncro_db::Db;
-use ncro_health::{Prober, Status};
+use ncro_health::{Prober, Status, UpstreamHealth};
 use ncro_router::{Router, RouterError};
 use serde::Serialize;
 
@@ -192,20 +192,29 @@ async fn nar(
   {
     return resp;
   }
+
+  // Try upstreams grouped by priority as a fallback (lower = preferred), within
+  // each group sorted by EMA latency.
+  let mut by_priority = BTreeMap::<i32, Vec<UpstreamHealth>>::new();
   for h in state.prober.sorted_by_latency().await {
     if h.status == Status::Down {
       continue;
     }
-    if let Some(resp) = try_nar_upstream(
-      &state.client,
-      req.method().clone(),
-      req.headers(),
-      &h.url,
-      req.uri().path(),
-    )
-    .await
-    {
-      return resp;
+    by_priority.entry(h.priority).or_default().push(h);
+  }
+  for (_priority, group) in by_priority {
+    for h in group {
+      if let Some(resp) = try_nar_upstream(
+        &state.client,
+        req.method().clone(),
+        req.headers(),
+        &h.url,
+        req.uri().path(),
+      )
+      .await
+      {
+        return resp;
+      }
     }
   }
   StatusCode::NOT_FOUND.into_response()
