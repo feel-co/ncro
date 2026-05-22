@@ -67,6 +67,31 @@ in {
         StateDirectory = "ncro";
         Restart = "on-failure";
         RestartSec = "5s";
+
+        # Hardening
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ProtectProc = "invisible";
+        ProtectHostname = true;
+        ProtectClock = true;
+        ProtectControlGroups = true;
+        ProtectKernelLogs = true;
+        ProtectKernelTunables = true;
+        RestrictRealtime = true;
+        CapabilityBoundingSet = "";
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_NETLINK" # required by mdns-sd and system resolver
+        ];
+        RestrictNamespaces = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        SystemCallFilter = ["@system-service"];
+        SystemCallArchitectures = "native";
       };
     };
   };
