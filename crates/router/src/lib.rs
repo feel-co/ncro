@@ -1,5 +1,5 @@
 use std::{
-  collections::HashMap,
+  collections::{BTreeMap, HashMap},
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -58,6 +58,19 @@ struct RouterInner {
 struct RaceResult {
   url:        String,
   latency_ms: f64,
+}
+
+/// Outcome of racing a single priority group.
+#[derive(Debug)]
+enum RaceGroupError {
+  /// Every reachable upstream in the group returned a non-success status
+  /// (i.e. the path is not present in this group).
+  NotFound,
+  /// Every upstream in the group hit a network-level error; the path may
+  /// exist but the group is unreachable.
+  NetworkError,
+  /// The race deadline expired before any upstream responded.
+  Timeout,
 }
 
 impl Router {
@@ -172,8 +185,48 @@ impl Router {
     if candidates.is_empty() {
       return Err(RouterError::NoCandidates(store_hash.to_string()));
     }
+
+    // Group candidates by priority. Lower number meanshigher priority, tried
+    // first. Upstreams whose health entry is missing get i32::MAX so that they
+    // fall into the lowest-priority group rather than being silently dropped.
+    let mut groups: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+    for url in candidates {
+      let priority = self
+        .inner
+        .prober
+        .get_health(url)
+        .await
+        .map_or(i32::MAX, |h| h.priority);
+      groups.entry(priority).or_default().push(url.clone());
+    }
+
+    let mut any_not_found = false;
+    for (_priority, group) in groups {
+      match self.race_group(store_hash, &group).await {
+        Ok(winner) => return self.commit_winner(winner, store_hash).await,
+        Err(RaceGroupError::NotFound) => any_not_found = true,
+        // Network errors: try the next priority group — those upstreams were
+        // unreachable so we cannot conclude the path is absent.
+        Err(RaceGroupError::NetworkError | RaceGroupError::Timeout) => {},
+      }
+    }
+
+    if any_not_found {
+      Err(RouterError::NotFound)
+    } else {
+      Err(RouterError::UpstreamUnavailable)
+    }
+  }
+
+  /// Race all upstreams in `group` in parallel. Returns the first winner or
+  /// a classification of the failure.
+  async fn race_group(
+    &self,
+    store_hash: &str,
+    group: &[String],
+  ) -> Result<RaceResult, RaceGroupError> {
     let mut handles = FuturesUnordered::new();
-    for upstream in candidates {
+    for upstream in group {
       let upstream = upstream.clone();
       let store_hash = store_hash.to_string();
       let client = self.inner.client.clone();
@@ -190,15 +243,17 @@ impl Router {
               latency_ms: start.elapsed().as_secs_f64() * 1000.0,
             })
           },
-          Ok(_) => Err(false),
-          Err(_) => Err(true),
+          Ok(_) => Err(false), // 404 / non-success = not found
+          Err(_) => Err(true), // network error
         }
       }));
     }
-    let mut net_errs = 0;
-    let mut not_founds = 0;
+
+    let mut net_errs = 0usize;
+    let mut not_founds = 0usize;
     let deadline = tokio::time::sleep(self.inner.race_timeout);
     tokio::pin!(deadline);
+
     let winner = loop {
       if handles.is_empty() {
         break None;
@@ -215,13 +270,34 @@ impl Router {
           }
       }
     };
-    let Some(winner) = winner else {
-      return if net_errs > 0 && not_founds == 0 {
-        Err(RouterError::UpstreamUnavailable)
-      } else {
-        Err(RouterError::NotFound)
-      };
-    };
+
+    if let Some(winner) = winner {
+      return Ok(winner);
+    }
+
+    // If there is no winner classify the failure so the caller can decide
+    // whether to try the next priority group.
+    if net_errs > 0 && not_founds == 0 {
+      Err(RaceGroupError::NetworkError)
+    } else if not_founds > 0 {
+      Err(RaceGroupError::NotFound)
+    } else {
+      Err(RaceGroupError::Timeout)
+    }
+  }
+
+  /// Fetch the full narinfo, then record metrics, update the prober and DB
+  /// for a race winner.
+  ///
+  /// Metrics and side-effects are only committed once the fetch succeeds, so
+  /// a failure does not inflate the win/latency counters.
+  async fn commit_winner(
+    &self,
+    winner: RaceResult,
+    store_hash: &str,
+  ) -> Result<ResolveResult, RouterError> {
+    let (body, nar_url, nar_hash, nar_size) =
+      self.fetch_narinfo(&winner.url, store_hash).await?;
 
     ncro_metrics::get()
       .upstream_race_wins
@@ -231,8 +307,7 @@ impl Router {
       .upstream_latency
       .with_label_values(&[&winner.url])
       .observe(winner.latency_ms / 1000.0);
-    let (body, nar_url, nar_hash, nar_size) =
-      self.fetch_narinfo(&winner.url, store_hash).await?;
+
     let ema = self
       .inner
       .prober
