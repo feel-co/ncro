@@ -355,4 +355,116 @@ mod tests {
     );
     Ok(())
   }
+
+  #[test]
+  fn backoff_thresholds_match_spec() {
+    let base = Duration::from_secs(10);
+    assert_eq!(backoff_interval(base, 0), base);
+    assert_eq!(backoff_interval(base, 2), base);
+    assert_eq!(backoff_interval(base, 3), base * 4);
+    assert_eq!(backoff_interval(base, 9), base * 4);
+    assert_eq!(backoff_interval(base, 10), base * 10);
+    assert_eq!(backoff_interval(base, 100), base * 10);
+  }
+
+  #[test]
+  fn status_boundaries() {
+    assert_eq!(compute_status(0), Status::Active);
+    assert_eq!(compute_status(2), Status::Active);
+    assert_eq!(compute_status(3), Status::Degraded);
+    assert_eq!(compute_status(9), Status::Degraded);
+    assert_eq!(compute_status(10), Status::Down);
+    assert_eq!(compute_status(u32::MAX), Status::Down);
+  }
+
+  #[tokio::test]
+  async fn first_record_latency_sets_exact_ema()
+  -> Result<(), Box<dyn std::error::Error>> {
+    let p = Prober::new(0.3)?;
+    p.add_upstream("https://example.com".into(), 1).await;
+    p.record_latency("https://example.com", 42.0).await;
+    let h = p.get_health("https://example.com").await.ok_or("missing")?;
+    assert_eq!(
+      h.ema_latency, 42.0,
+      "first sample must be exact, not alpha-weighted"
+    );
+    assert_eq!(h.total_queries, 1);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn record_latency_resets_consecutive_fails()
+  -> Result<(), Box<dyn std::error::Error>> {
+    let p = Prober::new(0.3)?;
+    p.add_upstream("https://example.com".into(), 1).await;
+    for _ in 0..5 {
+      p.record_failure("https://example.com").await;
+    }
+    assert_eq!(
+      p.get_health("https://example.com")
+        .await
+        .ok_or("missing")?
+        .status,
+      Status::Degraded
+    );
+    p.record_latency("https://example.com", 10.0).await;
+    let h = p.get_health("https://example.com").await.ok_or("missing")?;
+    assert_eq!(h.consecutive_fails, 0);
+    assert_eq!(h.status, Status::Active);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn sorted_by_latency_down_goes_last()
+  -> Result<(), Box<dyn std::error::Error>> {
+    use ncro_config::UpstreamConfig;
+    let p = Prober::new(0.3)?;
+    p.init_upstreams(&[
+      UpstreamConfig {
+        url:        "https://fast.com".into(),
+        priority:   1,
+        public_key: String::new(),
+      },
+      UpstreamConfig {
+        url:        "https://down.com".into(),
+        priority:   1,
+        public_key: String::new(),
+      },
+    ])
+    .await;
+    p.seed("https://fast.com", 10.0, 0, 5).await;
+    p.seed("https://down.com", 5.0, 10, 5).await; // faster but Down
+    let sorted = p.sorted_by_latency().await;
+    assert_eq!(sorted.last().unwrap().url, "https://down.com");
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn sorted_by_latency_priority_within_10pct_window()
+  -> Result<(), Box<dyn std::error::Error>> {
+    use ncro_config::UpstreamConfig;
+    let p = Prober::new(0.3)?;
+    p.init_upstreams(&[
+      UpstreamConfig {
+        url:        "https://high-priority.com".into(),
+        priority:   1,
+        public_key: String::new(),
+      },
+      UpstreamConfig {
+        url:        "https://low-priority.com".into(),
+        priority:   10,
+        public_key: String::new(),
+      },
+    ])
+    .await;
+    // Latencies within 10% of each other: high-priority slightly slower
+    p.seed("https://high-priority.com", 100.0, 0, 10).await;
+    p.seed("https://low-priority.com", 103.0, 0, 10).await;
+    let sorted = p.sorted_by_latency().await;
+    assert_eq!(
+      sorted[0].url, "https://high-priority.com",
+      "within 10% window, priority should break the tie"
+    );
+    Ok(())
+  }
 }

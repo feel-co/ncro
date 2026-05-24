@@ -512,6 +512,122 @@ mod tests {
     Ok(())
   }
 
+  #[test]
+  fn expired_route_is_not_valid() {
+    let now = Utc::now();
+    let entry = RouteEntry {
+      store_path:    "abc".into(),
+      upstream_url:  "https://cache.nixos.org".into(),
+      latency_ms:    1.0,
+      latency_ema:   1.0,
+      last_verified: now,
+      query_count:   1,
+      failure_count: 0,
+      ttl:           now - chrono::Duration::seconds(1),
+      nar_hash:      "sha256:abc".into(),
+      nar_size:      1,
+      nar_url:       "nar/abc.nar".into(),
+      narinfo_bytes: None,
+    };
+    assert!(!entry.is_valid());
+    let fresh = RouteEntry {
+      ttl: now + chrono::Duration::hours(1),
+      ..entry
+    };
+    assert!(fresh.is_valid());
+  }
+
+  #[tokio::test]
+  async fn get_route_by_nar_url_rejects_expired_ttl() -> Result<(), DbError> {
+    let db = Db::open(":memory:", 100).await?;
+    let now = Utc::now();
+    let entry = RouteEntry {
+      store_path:    "exp".into(),
+      upstream_url:  "https://cache.nixos.org".into(),
+      latency_ms:    1.0,
+      latency_ema:   1.0,
+      last_verified: now,
+      query_count:   1,
+      failure_count: 0,
+      ttl:           now - chrono::Duration::seconds(1),
+      nar_hash:      "sha256:exp".into(),
+      nar_size:      1,
+      nar_url:       "nar/exp.nar".into(),
+      narinfo_bytes: None,
+    };
+    db.set_route(&entry).await?;
+    assert!(
+      db.get_route_by_nar_url("nar/exp.nar").await?.is_none(),
+      "expired route must not be returned by nar_url lookup"
+    );
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn expire_old_routes_removes_stale_entries() -> Result<(), DbError> {
+    let db = Db::open(":memory:", 100).await?;
+    let now = Utc::now();
+    let expired = RouteEntry {
+      store_path:    "stale".into(),
+      upstream_url:  "https://cache.nixos.org".into(),
+      latency_ms:    1.0,
+      latency_ema:   1.0,
+      last_verified: now,
+      query_count:   1,
+      failure_count: 0,
+      ttl:           now - chrono::Duration::seconds(1),
+      nar_hash:      "sha256:stale".into(),
+      nar_size:      1,
+      nar_url:       "nar/stale.nar".into(),
+      narinfo_bytes: None,
+    };
+    let fresh = RouteEntry {
+      store_path: "fresh".into(),
+      nar_hash: "sha256:fresh".into(),
+      nar_url: "nar/fresh.nar".into(),
+      ttl: now + chrono::Duration::hours(1),
+      ..expired.clone()
+    };
+    db.set_route(&expired).await?;
+    db.set_route(&fresh).await?;
+    assert_eq!(db.route_count().await?, 2);
+    db.expire_old_routes().await?;
+    assert_eq!(db.route_count().await?, 1);
+    assert!(db.get_route("fresh").await?.is_some());
+    assert!(db.get_route("stale").await?.is_none());
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn eviction_bounds_table_size() -> Result<(), DbError> {
+    let max: i64 = 3;
+    let db = Db::open(":memory:", max).await?;
+    let now = Utc::now();
+    // 100 writes triggers eviction at write #100 (count 99 mod 100 == 99)
+    for i in 0..100u64 {
+      let entry = RouteEntry {
+        store_path:    format!("hash{i}"),
+        upstream_url:  "https://cache.nixos.org".into(),
+        latency_ms:    1.0,
+        latency_ema:   1.0,
+        last_verified: now,
+        query_count:   1,
+        failure_count: 0,
+        ttl:           now + chrono::Duration::hours(1),
+        nar_hash:      format!("sha256:{i}"),
+        nar_size:      1,
+        nar_url:       format!("nar/{i}.nar"),
+        narinfo_bytes: None,
+      };
+      db.set_route(&entry).await?;
+    }
+    assert!(
+      db.route_count().await? <= max,
+      "table must be bounded to max_entries={max} after eviction"
+    );
+    Ok(())
+  }
+
   #[tokio::test]
   async fn eviction_is_throttled() -> Result<(), DbError> {
     let db = Db::open(":memory:", 2).await?;

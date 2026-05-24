@@ -49,6 +49,47 @@ mod tests {
   }
 
   #[test]
+  fn missing_store_path_returns_error() {
+    let input = "URL: nar/abc.nar.xz\nNarHash: sha256:abc\nNarSize: 1\n";
+    assert!(matches!(
+      NarInfo::parse(input.as_bytes()),
+      Err(NarInfoError::MissingStorePath)
+    ));
+  }
+
+  #[test]
+  fn malformed_line_returns_error() {
+    let input = "StorePath: /nix/store/abc\nno-colon-here\n";
+    assert!(matches!(
+      NarInfo::parse(input.as_bytes()),
+      Err(NarInfoError::MalformedLine(_))
+    ));
+  }
+
+  #[test]
+  fn parse_public_key_error_paths() {
+    assert!(matches!(
+      parse_public_key("no-separator"),
+      Err(NarInfoError::MissingPublicKeySeparator { .. })
+    ));
+    // Empty name before colon
+    assert!(matches!(
+      parse_public_key(":dGVzdA=="),
+      Err(NarInfoError::MissingPublicKeySeparator { .. })
+    ));
+    // Valid name but invalid base64
+    assert!(matches!(
+      parse_public_key("test:!!!"),
+      Err(NarInfoError::InvalidPublicKeyBase64 { .. })
+    ));
+    // Valid base64 but wrong length (not 32 bytes)
+    assert!(matches!(
+      parse_public_key("test:dGVzdA=="),
+      Err(NarInfoError::InvalidPublicKeySize { .. })
+    ));
+  }
+
+  #[test]
   fn verifies_roundtrip_signature() -> Result<(), NarInfoError> {
     let mut key_bytes = [0_u8; 32];
     rand::rng().fill(&mut key_bytes);
@@ -67,6 +108,52 @@ mod tests {
     );
     ni.sig = vec![format!("test:{}", STANDARD.encode(sig.to_bytes()))];
     assert!(ni.verify(&pubkey)?);
+    Ok(())
+  }
+
+  #[test]
+  fn verify_with_wrong_key_returns_false() -> Result<(), NarInfoError> {
+    let mut key1_bytes = [0u8; 32];
+    let mut key2_bytes = [1u8; 32];
+    rand::rng().fill(&mut key1_bytes);
+    rand::rng().fill(&mut key2_bytes);
+    let signing1 = SigningKey::from_bytes(&key1_bytes);
+    let signing2 = SigningKey::from_bytes(&key2_bytes);
+    let mut ni = NarInfo {
+      store_path: "/nix/store/abc-test".into(),
+      nar_hash: "sha256:abc".into(),
+      nar_size: 12,
+      ..Default::default()
+    };
+    let sig = signing1.sign(ni.fingerprint().as_bytes());
+    ni.sig = vec![format!("test:{}", STANDARD.encode(sig.to_bytes()))];
+    let wrong_pubkey = format!(
+      "test:{}",
+      STANDARD.encode(signing2.verifying_key().to_bytes())
+    );
+    assert!(!ni.verify(&wrong_pubkey)?);
+    Ok(())
+  }
+
+  #[test]
+  fn verify_tampered_content_returns_false() -> Result<(), NarInfoError> {
+    let mut key_bytes = [0u8; 32];
+    rand::rng().fill(&mut key_bytes);
+    let signing = SigningKey::from_bytes(&key_bytes);
+    let mut ni = NarInfo {
+      store_path: "/nix/store/abc-test".into(),
+      nar_hash: "sha256:abc".into(),
+      nar_size: 12,
+      ..Default::default()
+    };
+    let sig = signing.sign(ni.fingerprint().as_bytes());
+    let pubkey = format!(
+      "test:{}",
+      STANDARD.encode(signing.verifying_key().to_bytes())
+    );
+    ni.sig = vec![format!("test:{}", STANDARD.encode(sig.to_bytes()))];
+    ni.nar_size = 999; // tamper after signing
+    assert!(!ni.verify(&pubkey)?);
     Ok(())
   }
 }
