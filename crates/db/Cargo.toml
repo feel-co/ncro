@@ -14,5 +14,8 @@ sqlx                = { workspace = true, features = [ "runtime-tokio-rustls", "
 thiserror.workspace = true
 tokio               = { workspace = true, features = [ "fs" ] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = [ "macros", "rt-multi-thread" ] }
+
 [lints]
 workspace = true
