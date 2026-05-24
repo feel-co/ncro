@@ -5,12 +5,13 @@ use std::{
 };
 
 use chrono::Utc;
+use dashmap::DashMap;
 use futures_util::{StreamExt, stream::FuturesUnordered};
+use moka::future::Cache as MokaCache;
 use ncro_db::{Db, DbError, RouteEntry};
 use ncro_health::{Prober, Status};
 use ncro_narinfo::{NarInfo, NarInfoError, parse_public_key};
 use thiserror::Error;
-use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Error)]
@@ -53,6 +54,7 @@ struct RouterInner {
   client:        reqwest::Client,
   upstream_keys: RwLock<HashMap<String, String>>,
   inflight:      DashMap<String, Arc<Mutex<()>>>,
+  lru:           MokaCache<String, Arc<ResolveResult>>,
 }
 
 #[derive(Debug)]
@@ -108,6 +110,10 @@ impl Router {
         client: reqwest::Client::builder().timeout(race_timeout).build()?,
         upstream_keys: RwLock::new(HashMap::new()),
         inflight: DashMap::new(),
+        lru: MokaCache::builder()
+          .max_capacity(1024)
+          .time_to_live(route_ttl)
+          .build(),
       }),
     })
   }
@@ -172,6 +178,10 @@ impl Router {
     &self,
     store_hash: &str,
   ) -> Result<Option<ResolveResult>, RouterError> {
+    if let Some(cached) = self.inner.lru.get(store_hash).await {
+      ncro_metrics::get().narinfo_cache_hits.inc();
+      return Ok(Some((*cached).clone()));
+    }
     let Some(entry) = self.inner.db.get_route(store_hash).await? else {
       return Ok(None);
     };
@@ -183,12 +193,15 @@ impl Router {
       return Ok(None);
     }
     ncro_metrics::get().narinfo_cache_hits.inc();
-    Ok(Some(ResolveResult {
+    let result = ResolveResult {
       url:           entry.upstream_url,
       latency_ms:    entry.latency_ema,
       cache_hit:     true,
       narinfo_bytes: entry.narinfo_bytes,
-    }))
+    };
+    let arc = Arc::new(result.clone());
+    self.inner.lru.insert(store_hash.to_string(), arc).await;
+    Ok(Some(result))
   }
 
   async fn race(
@@ -356,12 +369,18 @@ impl Router {
         narinfo_bytes: body.clone(),
       })
       .await?;
-    Ok(ResolveResult {
-      url:           winner.url,
+    let result = ResolveResult {
+      url:           winner.url.clone(),
       latency_ms:    winner.latency_ms,
       cache_hit:     false,
-      narinfo_bytes: body,
-    })
+      narinfo_bytes: body.clone(),
+    };
+    self
+      .inner
+      .lru
+      .insert(store_hash.to_string(), Arc::new(result.clone()))
+      .await;
+    Ok(result)
   }
 
   async fn fetch_narinfo(
@@ -397,15 +416,18 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
-  use super::InflightGuard;
   use std::sync::Arc;
+
   use tokio::sync::Mutex;
+
+  use super::InflightGuard;
 
   #[test]
   fn inflight_uses_dashmap() {
     use dashmap::DashMap;
     // Compile-time check that DashMap is in scope for router.
-    let _: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>> = DashMap::new();
+    let _: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>> =
+      DashMap::new();
   }
 
   #[test]
@@ -418,8 +440,14 @@ mod tests {
       .or_insert_with(|| Arc::new(Mutex::new(())));
     assert!(map.contains_key(&key));
     {
-      let _guard = InflightGuard { map: &map, key: key.clone() };
+      let _guard = InflightGuard {
+        map: &map,
+        key: key.clone(),
+      };
     }
-    assert!(!map.contains_key(&key), "entry not removed after guard drop");
+    assert!(
+      !map.contains_key(&key),
+      "entry not removed after guard drop"
+    );
   }
 }
