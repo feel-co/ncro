@@ -21,6 +21,11 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ];
     };
 
+  # relys on ca certificates
+  checkFlags = ''
+      "--skip=ncro::tests::ema_and_status_progression"
+    '';
+
   cargoLock.lockFile = "${finalAttrs.src}/Cargo.lock";
   nativeBuildInputs = [pkg-config];
 
