@@ -79,11 +79,14 @@ enum RaceGroupError {
 struct InflightGuard<'a> {
   map: &'a DashMap<String, Arc<Mutex<()>>>,
   key: String,
+  arc: Arc<Mutex<()>>,
 }
 
 impl Drop for InflightGuard<'_> {
   fn drop(&mut self) {
-    self.map.remove(&self.key);
+    self
+      .map
+      .remove_if(&self.key, |_, v| Arc::ptr_eq(v, &self.arc));
   }
 }
 
@@ -158,6 +161,7 @@ impl Router {
     let _cleanup = InflightGuard {
       map: &self.inner.inflight,
       key: store_hash.to_string(),
+      arc: Arc::clone(&lock),
     };
     if let Some(result) = self.valid_cached_route(store_hash).await? {
       return Ok(result);
@@ -435,14 +439,14 @@ mod tests {
     use dashmap::DashMap;
     let map: DashMap<String, Arc<Mutex<()>>> = DashMap::new();
     let key = "test_hash".to_string();
-    map
-      .entry(key.clone())
-      .or_insert_with(|| Arc::new(Mutex::new(())));
+    let arc = Arc::new(Mutex::new(()));
+    map.insert(key.clone(), Arc::clone(&arc));
     assert!(map.contains_key(&key));
     {
       let _guard = InflightGuard {
         map: &map,
         key: key.clone(),
+        arc: Arc::clone(&arc),
       };
     }
     assert!(
