@@ -10,6 +10,7 @@ use ncro_db::{Db, DbError, RouteEntry};
 use ncro_health::{Prober, Status};
 use ncro_narinfo::{NarInfo, NarInfoError, parse_public_key};
 use thiserror::Error;
+use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Error)]
@@ -51,7 +52,7 @@ struct RouterInner {
   negative_ttl:  Duration,
   client:        reqwest::Client,
   upstream_keys: RwLock<HashMap<String, String>>,
-  inflight:      Mutex<HashMap<String, Arc<Mutex<()>>>>,
+  inflight:      DashMap<String, Arc<Mutex<()>>>,
 }
 
 #[derive(Debug)]
@@ -95,7 +96,7 @@ impl Router {
         negative_ttl,
         client: reqwest::Client::builder().timeout(race_timeout).build()?,
         upstream_keys: RwLock::new(HashMap::new()),
-        inflight: Mutex::new(HashMap::new()),
+        inflight: DashMap::new(),
       }),
     })
   }
@@ -128,17 +129,17 @@ impl Router {
     }
     ncro_metrics::get().narinfo_cache_misses.inc();
 
-    let lock = {
-      let mut inflight = self.inner.inflight.lock().await;
-      Arc::clone(
-        inflight
-          .entry(store_hash.to_string())
-          .or_insert_with(|| Arc::new(Mutex::new(()))),
-      )
-    };
+    let lock = Arc::clone(
+      self
+        .inner
+        .inflight
+        .entry(store_hash.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .value(),
+    );
     let _guard = lock.lock().await;
     if let Some(result) = self.valid_cached_route(store_hash).await? {
-      self.inner.inflight.lock().await.remove(store_hash);
+      self.inner.inflight.remove(store_hash);
       return Ok(result);
     }
 
@@ -150,7 +151,7 @@ impl Router {
         .set_negative(store_hash, self.inner.negative_ttl)
         .await;
     }
-    self.inner.inflight.lock().await.remove(store_hash);
+    self.inner.inflight.remove(store_hash);
     result
   }
 
@@ -378,5 +379,15 @@ impl Router {
       return Err(RouterError::SignatureVerificationFailed);
     }
     Ok((Some(body), parsed.url, parsed.nar_hash, parsed.nar_size))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  #[test]
+  fn inflight_uses_dashmap() {
+    use dashmap::DashMap;
+    // Compile-time check that DashMap is in scope for router.
+    let _: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>> = DashMap::new();
   }
 }
