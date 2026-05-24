@@ -74,6 +74,17 @@ enum RaceGroupError {
   Timeout,
 }
 
+struct InflightGuard<'a> {
+  map: &'a DashMap<String, Arc<Mutex<()>>>,
+  key: String,
+}
+
+impl Drop for InflightGuard<'_> {
+  fn drop(&mut self) {
+    self.map.remove(&self.key);
+  }
+}
+
 impl Router {
   /// Create a router backed by the database and health prober.
   ///
@@ -138,8 +149,11 @@ impl Router {
         .value(),
     );
     let _guard = lock.lock().await;
+    let _cleanup = InflightGuard {
+      map: &self.inner.inflight,
+      key: store_hash.to_string(),
+    };
     if let Some(result) = self.valid_cached_route(store_hash).await? {
-      self.inner.inflight.remove(store_hash);
       return Ok(result);
     }
 
@@ -151,7 +165,6 @@ impl Router {
         .set_negative(store_hash, self.inner.negative_ttl)
         .await;
     }
-    self.inner.inflight.remove(store_hash);
     result
   }
 
@@ -384,10 +397,29 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
+  use super::InflightGuard;
+  use std::sync::Arc;
+  use tokio::sync::Mutex;
+
   #[test]
   fn inflight_uses_dashmap() {
     use dashmap::DashMap;
     // Compile-time check that DashMap is in scope for router.
     let _: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>> = DashMap::new();
+  }
+
+  #[test]
+  fn inflight_guard_removes_entry_on_drop() {
+    use dashmap::DashMap;
+    let map: DashMap<String, Arc<Mutex<()>>> = DashMap::new();
+    let key = "test_hash".to_string();
+    map
+      .entry(key.clone())
+      .or_insert_with(|| Arc::new(Mutex::new(())));
+    assert!(map.contains_key(&key));
+    {
+      let _guard = InflightGuard { map: &map, key: key.clone() };
+    }
+    assert!(!map.contains_key(&key), "entry not removed after guard drop");
   }
 }
