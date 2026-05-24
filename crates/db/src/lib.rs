@@ -73,7 +73,7 @@ impl Db {
     .busy_timeout(Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
-      .max_connections(1)
+      .max_connections(8)
       .connect_with(options)
       .await?;
     migrate(&pool).await?;
@@ -403,6 +403,38 @@ mod tests {
     assert!(db.get_route_by_nar_url("nar/abc.nar.xz").await?.is_some());
     db.set_negative("missing", Duration::from_secs(60)).await?;
     assert!(db.is_negative("missing").await?);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn concurrent_reads_do_not_deadlock() -> Result<(), DbError> {
+    let db = Db::open(":memory:", 100).await?;
+    let now = Utc::now();
+    let entry = RouteEntry {
+      store_path:    "aaa".into(),
+      upstream_url:  "https://cache.nixos.org".into(),
+      latency_ms:    1.0,
+      latency_ema:   1.0,
+      last_verified: now,
+      query_count:   1,
+      failure_count: 0,
+      ttl:           now + chrono::Duration::hours(1),
+      nar_hash:      "sha256:x".into(),
+      nar_size:      1,
+      nar_url:       "nar/x.nar".into(),
+      narinfo_bytes: None,
+    };
+    db.set_route(&entry).await?;
+    let db = std::sync::Arc::new(db);
+    let handles: Vec<_> = (0..4)
+      .map(|_| {
+        let db = db.clone();
+        tokio::spawn(async move { db.get_route("aaa").await })
+      })
+      .collect();
+    for h in handles {
+      assert!(h.await.unwrap()?.is_some());
+    }
     Ok(())
   }
 }
