@@ -179,7 +179,7 @@ impl Router {
       return Ok(None);
     }
     let health = self.inner.prober.get_health(&entry.upstream_url).await;
-    if !health.as_ref().is_none_or(|h| h.status == Status::Active) {
+    if health.as_ref().is_some_and(|h| h.status == Status::Down) {
       return Ok(None);
     }
     ncro_metrics::get().narinfo_cache_hits.inc();
@@ -187,7 +187,7 @@ impl Router {
       url:           entry.upstream_url,
       latency_ms:    entry.latency_ema,
       cache_hit:     true,
-      narinfo_bytes: None,
+      narinfo_bytes: entry.narinfo_bytes,
     }))
   }
 
