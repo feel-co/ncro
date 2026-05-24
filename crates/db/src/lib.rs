@@ -1,4 +1,11 @@
-use std::{path::Path, time::Duration};
+use std::{
+  path::Path,
+  sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+  },
+  time::Duration,
+};
 
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::{
@@ -52,6 +59,7 @@ pub struct HealthRow {
 pub struct Db {
   pool:        SqlitePool,
   max_entries: i64,
+  write_count: Arc<AtomicU64>,
 }
 
 impl Db {
@@ -77,7 +85,11 @@ impl Db {
       .connect_with(options)
       .await?;
     migrate(&pool).await?;
-    Ok(Self { pool, max_entries })
+    Ok(Self {
+      pool,
+      max_entries,
+      write_count: Arc::new(AtomicU64::new(0)),
+    })
   }
 
   pub async fn get_route(
@@ -142,7 +154,11 @@ impl Db {
         .bind(&entry.nar_url)
         .execute(&self.pool)
         .await?;
-    self.evict_if_needed().await
+    let count = self.write_count.fetch_add(1, Ordering::Relaxed);
+    if count % 100 == 0 {
+      self.evict_if_needed().await?;
+    }
+    Ok(())
   }
 
   pub async fn expire_old_routes(&self) -> Result<(), DbError> {
@@ -435,6 +451,31 @@ mod tests {
     for h in handles {
       assert!(h.await.unwrap()?.is_some());
     }
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn eviction_is_throttled() -> Result<(), DbError> {
+    let db = Db::open(":memory:", 2).await?;
+    let now = Utc::now();
+    for i in 0..3u64 {
+      let entry = RouteEntry {
+        store_path:    format!("hash{i}"),
+        upstream_url:  "https://cache.nixos.org".into(),
+        latency_ms:    1.0,
+        latency_ema:   1.0,
+        last_verified: now,
+        query_count:   1,
+        failure_count: 0,
+        ttl:           now + chrono::Duration::hours(1),
+        nar_hash:      format!("sha256:{i}"),
+        nar_size:      1,
+        nar_url:       format!("nar/{i}.nar"),
+        narinfo_bytes: None,
+      };
+      db.set_route(&entry).await?;
+    }
+    assert!(db.get_route("hash0").await.is_ok());
     Ok(())
   }
 }
