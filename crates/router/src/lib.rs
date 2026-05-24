@@ -339,6 +339,7 @@ impl Router {
         nar_hash,
         nar_size,
         nar_url,
+        narinfo_bytes: body.clone(),
       })
       .await?;
     Ok(ResolveResult {
