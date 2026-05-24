@@ -162,7 +162,7 @@ impl Db {
         .execute(&self.pool)
         .await?;
     let count = self.write_count.fetch_add(1, Ordering::Relaxed);
-    if count % 100 == 0 {
+    if count % 100 == 99 {
       self.evict_if_needed().await?;
     }
     Ok(())
