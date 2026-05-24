@@ -30,11 +30,13 @@ base64             = "0.22.1"
 bytes              = "1.11.1"
 chrono             = "0.4.44"
 clap               = "4.6.1"
+dashmap            = "6.2.1"
 ed25519-dalek      = "2.2.0"
 futures-util       = "0.3.32"
 hex                = "0.4.3"
 humantime-serde    = "1.1.1"
 mdns-sd            = "0.19.1"
+moka               = { version = "0.12.15", features = [ "future" ] }
 prometheus         = "0.14.0"
 rand               = "0.10.1"
 reqwest            = { version = "0.13.3", default-features = false }

@@ -5,7 +5,9 @@ use std::{
 };
 
 use chrono::Utc;
+use dashmap::DashMap;
 use futures_util::{StreamExt, stream::FuturesUnordered};
+use moka::future::Cache as MokaCache;
 use ncro_db::{Db, DbError, RouteEntry};
 use ncro_health::{Prober, Status};
 use ncro_narinfo::{NarInfo, NarInfoError, parse_public_key};
@@ -51,7 +53,8 @@ struct RouterInner {
   negative_ttl:  Duration,
   client:        reqwest::Client,
   upstream_keys: RwLock<HashMap<String, String>>,
-  inflight:      Mutex<HashMap<String, Arc<Mutex<()>>>>,
+  inflight:      DashMap<String, Arc<Mutex<()>>>,
+  lru:           MokaCache<String, Arc<ResolveResult>>,
 }
 
 #[derive(Debug)]
@@ -71,6 +74,20 @@ enum RaceGroupError {
   NetworkError,
   /// The race deadline expired before any upstream responded.
   Timeout,
+}
+
+struct InflightGuard<'a> {
+  map: &'a DashMap<String, Arc<Mutex<()>>>,
+  key: String,
+  arc: Arc<Mutex<()>>,
+}
+
+impl Drop for InflightGuard<'_> {
+  fn drop(&mut self) {
+    self
+      .map
+      .remove_if(&self.key, |_, v| Arc::ptr_eq(v, &self.arc));
+  }
 }
 
 impl Router {
@@ -95,7 +112,11 @@ impl Router {
         negative_ttl,
         client: reqwest::Client::builder().timeout(race_timeout).build()?,
         upstream_keys: RwLock::new(HashMap::new()),
-        inflight: Mutex::new(HashMap::new()),
+        inflight: DashMap::new(),
+        lru: MokaCache::builder()
+          .max_capacity(1024)
+          .time_to_live(route_ttl)
+          .build(),
       }),
     })
   }
@@ -128,17 +149,21 @@ impl Router {
     }
     ncro_metrics::get().narinfo_cache_misses.inc();
 
-    let lock = {
-      let mut inflight = self.inner.inflight.lock().await;
-      Arc::clone(
-        inflight
-          .entry(store_hash.to_string())
-          .or_insert_with(|| Arc::new(Mutex::new(()))),
-      )
-    };
+    let lock = Arc::clone(
+      self
+        .inner
+        .inflight
+        .entry(store_hash.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .value(),
+    );
     let _guard = lock.lock().await;
+    let _cleanup = InflightGuard {
+      map: &self.inner.inflight,
+      key: store_hash.to_string(),
+      arc: Arc::clone(&lock),
+    };
     if let Some(result) = self.valid_cached_route(store_hash).await? {
-      self.inner.inflight.lock().await.remove(store_hash);
       return Ok(result);
     }
 
@@ -150,7 +175,6 @@ impl Router {
         .set_negative(store_hash, self.inner.negative_ttl)
         .await;
     }
-    self.inner.inflight.lock().await.remove(store_hash);
     result
   }
 
@@ -158,6 +182,10 @@ impl Router {
     &self,
     store_hash: &str,
   ) -> Result<Option<ResolveResult>, RouterError> {
+    if let Some(cached) = self.inner.lru.get(store_hash).await {
+      ncro_metrics::get().narinfo_cache_hits.inc();
+      return Ok(Some((*cached).clone()));
+    }
     let Some(entry) = self.inner.db.get_route(store_hash).await? else {
       return Ok(None);
     };
@@ -165,16 +193,19 @@ impl Router {
       return Ok(None);
     }
     let health = self.inner.prober.get_health(&entry.upstream_url).await;
-    if !health.as_ref().is_none_or(|h| h.status == Status::Active) {
+    if health.as_ref().is_some_and(|h| h.status == Status::Down) {
       return Ok(None);
     }
     ncro_metrics::get().narinfo_cache_hits.inc();
-    Ok(Some(ResolveResult {
+    let result = ResolveResult {
       url:           entry.upstream_url,
       latency_ms:    entry.latency_ema,
       cache_hit:     true,
-      narinfo_bytes: None,
-    }))
+      narinfo_bytes: entry.narinfo_bytes,
+    };
+    let arc = Arc::new(result.clone());
+    self.inner.lru.insert(store_hash.to_string(), arc).await;
+    Ok(Some(result))
   }
 
   async fn race(
@@ -339,14 +370,21 @@ impl Router {
         nar_hash,
         nar_size,
         nar_url,
+        narinfo_bytes: body.clone(),
       })
       .await?;
-    Ok(ResolveResult {
-      url:           winner.url,
+    let result = ResolveResult {
+      url:           winner.url.clone(),
       latency_ms:    winner.latency_ms,
       cache_hit:     false,
-      narinfo_bytes: body,
-    })
+      narinfo_bytes: body.clone(),
+    };
+    self
+      .inner
+      .lru
+      .insert(store_hash.to_string(), Arc::new(result.clone()))
+      .await;
+    Ok(result)
   }
 
   async fn fetch_narinfo(
@@ -377,5 +415,43 @@ impl Router {
       return Err(RouterError::SignatureVerificationFailed);
     }
     Ok((Some(body), parsed.url, parsed.nar_hash, parsed.nar_size))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+
+  use tokio::sync::Mutex;
+
+  use super::InflightGuard;
+
+  #[test]
+  fn inflight_uses_dashmap() {
+    use dashmap::DashMap;
+    // Compile-time check that DashMap is in scope for router.
+    let _: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>> =
+      DashMap::new();
+  }
+
+  #[test]
+  fn inflight_guard_removes_entry_on_drop() {
+    use dashmap::DashMap;
+    let map: DashMap<String, Arc<Mutex<()>>> = DashMap::new();
+    let key = "test_hash".to_string();
+    let arc = Arc::new(Mutex::new(()));
+    map.insert(key.clone(), Arc::clone(&arc));
+    assert!(map.contains_key(&key));
+    {
+      let _guard = InflightGuard {
+        map: &map,
+        key: key.clone(),
+        arc: Arc::clone(&arc),
+      };
+    }
+    assert!(
+      !map.contains_key(&key),
+      "entry not removed after guard drop"
+    );
   }
 }
