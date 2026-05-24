@@ -16,7 +16,7 @@ in {
   options.services.ncro = {
     enable = mkEnableOption "ncro, the Nix cache route optimizer";
 
-    package = mkPackageOption self.packages.${pkgs.stdenv.hostPlatform.system} {
+    package = mkPackageOption self.packages.${pkgs.stdenv.hostPlatform.system} "ncro" {
       default = "ncro";
       pkgsText = "self.packages.$${pkgs.stdenv.hostPlatform.system}";
     };
