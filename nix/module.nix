@@ -21,9 +21,9 @@ in
     package = mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
-      defaultText = "inputs.ncro.packages.$${system}.ncro";
+      defaultText = literalExpression "inputs.ncro.packages.$${system}.ncro";
       description = "The ncro package to use.";
-      example = "inputs.ncro.packages.$${system}.ncro";
+      example = literalExpression "inputs.ncro.packages.$${system}.ncro";
     };
 
     settings = mkOption {
