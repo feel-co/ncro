@@ -20,7 +20,7 @@
     });
 
     nixosModules = {
-      ncro = import ./nix/module.nix self;
+      ncro = ./nix/module.nix;
       default = self.nixosModules.ncro;
     };
 
