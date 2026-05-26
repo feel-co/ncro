@@ -69,11 +69,15 @@ impl Discovery {
           }
           event = event_rx.recv() => {
               if let Some(ServiceEvent::ServiceResolved(info)) = event {
+                  // Prefer IPv4 over IPv6 simply because many binary cache servers only
+                  // bind to 0.0.0.0. Skip loopback and unspecified (avahi
+                  // publishes all addresses, including 127.0.0.1/::1).
                   let Some(addr) = info
                       .get_addresses()
                       .iter()
                       .map(mdns_sd::ScopedIp::to_ip_addr)
-                      .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
+                      .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+                      .min_by_key(|ip| u8::from(!ip.is_ipv4()))
                   else {
                       continue;
                   };
