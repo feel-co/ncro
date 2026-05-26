@@ -235,3 +235,67 @@ fn decode_packet(packet: &[u8]) -> Result<DecodedPacket<'_>, MeshError> {
   let msg = rmp_serde::from_slice(body)?;
   Ok((pubkey, sig, body, msg))
 }
+
+#[cfg(test)]
+mod tests {
+  #![expect(clippy::unwrap_used, reason = "Fine in tests")]
+  use ncro_db::{Db, RouteEntry};
+
+  use super::merge_routes;
+
+  fn route(store_path: &str, latency_ema: f64, ttl_secs: i64) -> RouteEntry {
+    let now = chrono::Utc::now();
+    RouteEntry {
+      store_path: store_path.into(),
+      upstream_url: "http://test.example.com".into(),
+      latency_ms: latency_ema,
+      latency_ema,
+      last_verified: now,
+      query_count: 1,
+      failure_count: 0,
+      ttl: now + chrono::Duration::seconds(ttl_secs),
+      nar_hash: "sha256:aabbcc".into(),
+      nar_size: 42,
+      nar_url: "nar/test.nar".into(),
+      narinfo_bytes: None,
+    }
+  }
+
+  #[tokio::test]
+  async fn merge_routes_inserts_new_route() {
+    let db = Db::open(":memory:", 100).await.unwrap();
+    merge_routes(&db, vec![route("abc123", 10.0, 3600)]).await;
+    assert!(db.get_route("abc123").await.unwrap().is_some());
+  }
+
+  #[tokio::test]
+  async fn merge_routes_skips_expired_route() {
+    let db = Db::open(":memory:", 100).await.unwrap();
+    merge_routes(&db, vec![route("abc123", 10.0, -1)]).await;
+    assert!(db.get_route("abc123").await.unwrap().is_none());
+  }
+
+  #[tokio::test]
+  async fn merge_routes_does_not_overwrite_lower_latency() {
+    let db = Db::open(":memory:", 100).await.unwrap();
+    db.set_route(&route("abc123", 5.0, 3600)).await.unwrap();
+    merge_routes(&db, vec![route("abc123", 20.0, 3600)]).await;
+    let got = db.get_route("abc123").await.unwrap().unwrap();
+    assert_eq!(
+      got.latency_ema, 5.0,
+      "worse incoming must not overwrite better existing"
+    );
+  }
+
+  #[tokio::test]
+  async fn merge_routes_overwrites_higher_latency() {
+    let db = Db::open(":memory:", 100).await.unwrap();
+    db.set_route(&route("abc123", 20.0, 3600)).await.unwrap();
+    merge_routes(&db, vec![route("abc123", 5.0, 3600)]).await;
+    let got = db.get_route("abc123").await.unwrap().unwrap();
+    assert_eq!(
+      got.latency_ema, 5.0,
+      "better incoming must overwrite worse existing"
+    );
+  }
+}
