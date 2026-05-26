@@ -1,0 +1,49 @@
+name: NixOS VM Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    name: Detect Changed Files
+    runs-on: ubuntu-latest
+    outputs:
+      files_changed: ${{ steps.changed-files.outputs.files }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: changed-files
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            files:
+              - '.github/workflows/vm-tests.yaml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'ncro/**'
+              - 'nix/package.nix'
+              - 'nix/module.nix'
+              - 'nix/tests/**'
+              - 'flake.nix'
+              - 'flake.lock'
+
+  vm-test:
+    name: ${{ matrix.name }}
+    needs: changes
+    if: ${{ needs.changes.outputs.files_changed == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: P2P Discovery Test
+            check: p2p-discovery
+          - name: E2E Test
+            check: e2e
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#checks.x86_64-linux.${{ matrix.check }} -L --no-link
