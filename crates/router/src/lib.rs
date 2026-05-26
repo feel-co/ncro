@@ -461,8 +461,9 @@ impl Router {
     winner: RaceResult,
     store_hash: &str,
   ) -> Result<ResolveResult, RouterError> {
-    let (body, nar_url, nar_hash, nar_size) =
+    let (body, raw_nar_url, nar_hash, nar_size) =
       self.fetch_narinfo(&winner.url, store_hash).await?;
+    let nar_url = raw_nar_url.trim_start_matches('/').to_string();
 
     ncro_metrics::get()
       .upstream_race_wins
