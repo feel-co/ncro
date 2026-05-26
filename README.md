@@ -164,7 +164,14 @@ priority = 20
 db_path = "/var/lib/ncro/routes.db"
 max_entries = 100000 # LRU eviction above this
 ttl = "1h" # how long a routing decision is trusted
+negative_ttl = "10m" # cache misses for a short window
 latency_alpha = 0.3 # EMA smoothing factor (0 < alpha < 1)
+
+[cache.mass_query]
+max_concurrent_races = 64 # total concurrent narinfo races
+per_upstream_max_inflight = 8 # per-upstream narinfo head concurrency
+in_memory_negative_ttl = "5s" # short-lived miss suppression
+upstream_cooldown = "15s" # cooldown on transient upstream network errors
 
 [logging]
 level = "info" # debug | info | warn | error

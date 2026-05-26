@@ -20,6 +20,12 @@ max_entries   = 100000
 negative_ttl  = "10m"
 ttl           = "1h"
 
+[cache.mass_query]
+in_memory_negative_ttl    = "5s"
+max_concurrent_races      = 64
+per_upstream_max_inflight = 8
+upstream_cooldown         = "15s"
+
 [discovery]
 discovery_time = "5s"
 domain         = "local"
