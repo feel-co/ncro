@@ -555,18 +555,32 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
-  use std::sync::Arc;
+  #![expect(clippy::unwrap_used, reason = "Fine in tests")]
+  use std::{sync::Arc, time::Duration};
 
+  use ncro_db::Db;
+  use ncro_health::Prober;
   use tokio::sync::Mutex;
 
-  use super::InflightGuard;
+  use super::{InflightGuard, Router, RouterTuning};
 
-  #[test]
-  fn inflight_uses_dashmap() {
-    use dashmap::DashMap;
-    // Compile-time check that DashMap is in scope for router.
-    let _: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>> =
-      DashMap::new();
+  async fn make_router(cooldown: Duration) -> Router {
+    let db = Db::open(":memory:", 100).await.unwrap();
+    let prober = Prober::new(0.3).unwrap();
+    Router::new(
+      db,
+      prober,
+      Duration::from_secs(3600),
+      Duration::from_secs(5),
+      Duration::from_secs(600),
+      RouterTuning {
+        max_concurrent_races:      4,
+        per_upstream_max_inflight: 2,
+        in_memory_negative_ttl:    Duration::from_secs(300),
+        upstream_cooldown:         cooldown,
+      },
+    )
+    .unwrap()
   }
 
   #[test]
@@ -588,5 +602,67 @@ mod tests {
       !map.contains_key(&key),
       "entry not removed after guard drop"
     );
+  }
+
+  #[tokio::test]
+  async fn mark_cooldown_makes_upstream_unavailable() {
+    let router = make_router(Duration::from_secs(60)).await;
+    let url = "https://cache.example.com";
+    assert!(!router.in_cooldown(url));
+    router.mark_cooldown(url);
+    assert!(router.in_cooldown(url));
+  }
+
+  #[tokio::test]
+  async fn cooldown_expires_with_zero_window() {
+    let router = make_router(Duration::ZERO).await;
+    let url = "https://cache.example.com";
+    // Deadline is Instant::now() + 0, already not in the future.
+    router.mark_cooldown(url);
+    assert!(!router.in_cooldown(url));
+  }
+
+  #[tokio::test]
+  async fn cooldown_filter_excludes_cooled_down_upstream() {
+    let router = make_router(Duration::from_secs(60)).await;
+    let hot = "https://hot.example.com".to_string();
+    let cold = "https://cold.example.com".to_string();
+    router.mark_cooldown(&cold);
+    let result = router.cooldown_filtered_candidates(&[hot.clone(), cold]);
+    assert_eq!(result, vec![hot]);
+  }
+
+  #[tokio::test]
+  async fn cooldown_filter_passes_all_when_none_cooled() {
+    let router = make_router(Duration::from_secs(60)).await;
+    let candidates = vec![
+      "https://a.example.com".to_string(),
+      "https://b.example.com".to_string(),
+    ];
+    assert_eq!(router.cooldown_filtered_candidates(&candidates), candidates);
+  }
+
+  #[tokio::test]
+  async fn upstream_gate_is_stable_per_key() {
+    let router = make_router(Duration::from_secs(60)).await;
+    let url = "https://cache.example.com";
+    let gate1 = router.upstream_gate(url);
+    let gate2 = router.upstream_gate(url);
+    assert!(Arc::ptr_eq(&gate1, &gate2));
+  }
+
+  #[tokio::test]
+  async fn upstream_gate_is_distinct_per_upstream() {
+    let router = make_router(Duration::from_secs(60)).await;
+    let gate_a = router.upstream_gate("https://a.example.com");
+    let gate_b = router.upstream_gate("https://b.example.com");
+    assert!(!Arc::ptr_eq(&gate_a, &gate_b));
+  }
+
+  #[tokio::test]
+  async fn upstream_gate_semaphore_capacity_matches_tuning() {
+    let router = make_router(Duration::from_secs(60)).await;
+    let gate = router.upstream_gate("https://cache.example.com");
+    assert_eq!(gate.available_permits(), 2);
   }
 }
