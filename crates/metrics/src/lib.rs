@@ -13,14 +13,19 @@ use prometheus::{
 };
 
 pub struct Metrics {
-  registry:                 Registry,
-  pub narinfo_cache_hits:   IntCounter,
-  pub narinfo_cache_misses: IntCounter,
-  pub narinfo_requests:     IntCounterVec,
-  pub nar_requests:         IntCounter,
-  pub upstream_race_wins:   IntCounterVec,
-  pub route_entries:        IntGauge,
-  pub upstream_latency:     HistogramVec,
+  registry:                                  Registry,
+  pub narinfo_cache_hits:                    IntCounter,
+  pub narinfo_cache_misses:                  IntCounter,
+  pub narinfo_memory_negative_hits:          IntCounter,
+  pub narinfo_singleflight_waiters:          IntCounter,
+  pub narinfo_requests:                      IntCounterVec,
+  pub nar_requests:                          IntCounter,
+  pub narinfo_upstream_attempts:             IntCounter,
+  pub narinfo_upstream_attempts_per_resolve: HistogramVec,
+  pub narinfo_race_wait_seconds:             HistogramVec,
+  pub upstream_race_wins:                    IntCounterVec,
+  pub route_entries:                         IntGauge,
+  pub upstream_latency:                      HistogramVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -43,6 +48,16 @@ pub fn get() -> &'static Metrics {
       "Narinfo requests requiring upstream race.",
     )
     .expect("valid metric");
+    let narinfo_memory_negative_hits = IntCounter::new(
+      "ncro_narinfo_memory_negative_hits_total",
+      "Narinfo requests denied by short-lived in-memory negative cache.",
+    )
+    .expect("valid metric");
+    let narinfo_singleflight_waiters = IntCounter::new(
+      "ncro_narinfo_singleflight_waiters_total",
+      "Narinfo requests that waited on an in-flight same-hash lookup.",
+    )
+    .expect("valid metric");
     let narinfo_requests = IntCounterVec::new(
       Opts::new("ncro_narinfo_requests_total", "Narinfo requests by status."),
       &["status"],
@@ -51,6 +66,27 @@ pub fn get() -> &'static Metrics {
     let nar_requests =
       IntCounter::new("ncro_nar_requests_total", "NAR streaming requests.")
         .expect("valid metric");
+    let narinfo_upstream_attempts = IntCounter::new(
+      "ncro_narinfo_upstream_attempts_total",
+      "Total upstream narinfo attempts made during races.",
+    )
+    .expect("valid metric");
+    let narinfo_upstream_attempts_per_resolve = HistogramVec::new(
+      HistogramOpts::new(
+        "ncro_narinfo_upstream_attempts_per_resolve",
+        "Upstream attempts per narinfo resolution.",
+      ),
+      &["result"],
+    )
+    .expect("valid metric");
+    let narinfo_race_wait_seconds = HistogramVec::new(
+      HistogramOpts::new(
+        "ncro_narinfo_race_wait_seconds",
+        "Time spent waiting for race concurrency permit.",
+      ),
+      &["kind"],
+    )
+    .expect("valid metric");
     let upstream_race_wins = IntCounterVec::new(
       Opts::new(
         "ncro_upstream_race_wins_total",
@@ -77,8 +113,13 @@ pub fn get() -> &'static Metrics {
       Box::new(narinfo_cache_hits.clone())
         as Box<dyn prometheus::core::Collector>,
       Box::new(narinfo_cache_misses.clone()),
+      Box::new(narinfo_memory_negative_hits.clone()),
+      Box::new(narinfo_singleflight_waiters.clone()),
       Box::new(narinfo_requests.clone()),
       Box::new(nar_requests.clone()),
+      Box::new(narinfo_upstream_attempts.clone()),
+      Box::new(narinfo_upstream_attempts_per_resolve.clone()),
+      Box::new(narinfo_race_wait_seconds.clone()),
       Box::new(upstream_race_wins.clone()),
       Box::new(route_entries.clone()),
       Box::new(upstream_latency.clone()),
@@ -90,8 +131,13 @@ pub fn get() -> &'static Metrics {
       registry,
       narinfo_cache_hits,
       narinfo_cache_misses,
+      narinfo_memory_negative_hits,
+      narinfo_singleflight_waiters,
       narinfo_requests,
       nar_requests,
+      narinfo_upstream_attempts,
+      narinfo_upstream_attempts_per_resolve,
+      narinfo_race_wait_seconds,
       upstream_race_wins,
       route_entries,
       upstream_latency,

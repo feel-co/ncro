@@ -5,14 +5,14 @@ use std::{
 };
 
 use chrono::Utc;
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use moka::future::Cache as MokaCache;
 use ncro_db::{Db, DbError, RouteEntry};
 use ncro_health::{Prober, Status};
 use ncro_narinfo::{NarInfo, NarInfoError, parse_public_key};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 #[derive(Debug, Error)]
 pub enum RouterError {
@@ -45,16 +45,30 @@ pub struct Router {
   inner: Arc<RouterInner>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RouterTuning {
+  pub max_concurrent_races:      u32,
+  pub per_upstream_max_inflight: u32,
+  pub in_memory_negative_ttl:    Duration,
+  pub upstream_cooldown:         Duration,
+}
+
 struct RouterInner {
-  db:            Db,
-  prober:        Prober,
-  route_ttl:     Duration,
-  race_timeout:  Duration,
-  negative_ttl:  Duration,
-  client:        reqwest::Client,
-  upstream_keys: RwLock<HashMap<String, String>>,
-  inflight:      DashMap<String, Arc<Mutex<()>>>,
-  lru:           MokaCache<String, Arc<ResolveResult>>,
+  db:                       Db,
+  prober:                   Prober,
+  route_ttl:                Duration,
+  race_timeout:             Duration,
+  negative_ttl:             Duration,
+  client:                   reqwest::Client,
+  upstream_keys:            RwLock<HashMap<String, String>>,
+  inflight:                 DashMap<String, Arc<Mutex<()>>>,
+  lru:                      MokaCache<String, Arc<ResolveResult>>,
+  miss_lru:                 MokaCache<String, ()>,
+  race_semaphore:           Arc<Semaphore>,
+  per_upstream_limit:       u32,
+  upstream_semaphores:      DashMap<String, Arc<Semaphore>>,
+  upstream_cooldown:        DashMap<String, Instant>,
+  upstream_cooldown_window: Duration,
 }
 
 #[derive(Debug)]
@@ -74,6 +88,12 @@ enum RaceGroupError {
   NetworkError,
   /// The race deadline expired before any upstream responded.
   Timeout,
+}
+
+enum RaceAttempt {
+  Winner(RaceResult),
+  NotFound,
+  NetworkError { upstream: String },
 }
 
 struct InflightGuard<'a> {
@@ -102,6 +122,7 @@ impl Router {
     route_ttl: Duration,
     race_timeout: Duration,
     negative_ttl: Duration,
+    tuning: RouterTuning,
   ) -> Result<Self, reqwest::Error> {
     Ok(Self {
       inner: Arc::new(RouterInner {
@@ -117,6 +138,17 @@ impl Router {
           .max_capacity(1024)
           .time_to_live(route_ttl)
           .build(),
+        miss_lru: MokaCache::builder()
+          .max_capacity(32_768)
+          .time_to_live(tuning.in_memory_negative_ttl)
+          .build(),
+        race_semaphore: Arc::new(Semaphore::new(
+          usize::try_from(tuning.max_concurrent_races).unwrap_or(64),
+        )),
+        per_upstream_limit: tuning.per_upstream_max_inflight,
+        upstream_semaphores: DashMap::new(),
+        upstream_cooldown: DashMap::new(),
+        upstream_cooldown_window: tuning.upstream_cooldown,
       }),
     })
   }
@@ -141,6 +173,10 @@ impl Router {
     store_hash: &str,
     candidates: &[String],
   ) -> Result<ResolveResult, RouterError> {
+    if self.inner.miss_lru.get(store_hash).await.is_some() {
+      ncro_metrics::get().narinfo_memory_negative_hits.inc();
+      return Err(RouterError::NotFound);
+    }
     if self.inner.db.is_negative(store_hash).await? {
       return Err(RouterError::NotFound);
     }
@@ -149,14 +185,16 @@ impl Router {
     }
     ncro_metrics::get().narinfo_cache_misses.inc();
 
-    let lock = Arc::clone(
-      self
-        .inner
-        .inflight
-        .entry(store_hash.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .value(),
-    );
+    let lock = match self.inner.inflight.entry(store_hash.to_string()) {
+      Entry::Occupied(entry) => {
+        ncro_metrics::get().narinfo_singleflight_waiters.inc();
+        Arc::clone(entry.get())
+      },
+      Entry::Vacant(entry) => {
+        let inserted = entry.insert(Arc::new(Mutex::new(())));
+        Arc::clone(&inserted)
+      },
+    };
     let _guard = lock.lock().await;
     let _cleanup = InflightGuard {
       map: &self.inner.inflight,
@@ -169,6 +207,7 @@ impl Router {
 
     let result = self.race(store_hash, candidates).await;
     if matches!(result, Err(RouterError::NotFound)) {
+      self.inner.miss_lru.insert(store_hash.to_string(), ()).await;
       let _ = self
         .inner
         .db
@@ -216,12 +255,31 @@ impl Router {
     if candidates.is_empty() {
       return Err(RouterError::NoCandidates(store_hash.to_string()));
     }
+    let wait_start = Instant::now();
+    let _race_permit = self
+      .inner
+      .race_semaphore
+      .clone()
+      .acquire_owned()
+      .await
+      .map_err(|_| RouterError::UpstreamUnavailable)?;
+    ncro_metrics::get()
+      .narinfo_race_wait_seconds
+      .with_label_values(&["global"])
+      .observe(wait_start.elapsed().as_secs_f64());
+
+    let filtered = self.cooldown_filtered_candidates(candidates);
+    let effective_candidates = if filtered.is_empty() {
+      candidates.to_vec()
+    } else {
+      filtered
+    };
 
     // Group candidates by priority. Lower number meanshigher priority, tried
     // first. Upstreams whose health entry is missing get i32::MAX so that they
     // fall into the lowest-priority group rather than being silently dropped.
     let mut groups: BTreeMap<i32, Vec<String>> = BTreeMap::new();
-    for url in candidates {
+    for url in &effective_candidates {
       let priority = self
         .inner
         .prober
@@ -232,15 +290,32 @@ impl Router {
     }
 
     let mut any_not_found = false;
+    let mut attempts_total = 0_u64;
     for (_priority, group) in groups {
-      match self.race_group(store_hash, &group).await {
-        Ok(winner) => return self.commit_winner(winner, store_hash).await,
+      let (group_result, attempts) = self.race_group(store_hash, &group).await;
+      attempts_total += attempts;
+      match group_result {
+        Ok(winner) => {
+          ncro_metrics::get()
+            .narinfo_upstream_attempts_per_resolve
+            .with_label_values(&["success"])
+            .observe(attempts_total as f64);
+          return self.commit_winner(winner, store_hash).await;
+        },
         Err(RaceGroupError::NotFound) => any_not_found = true,
         // Try the next priority group on network error; those upstreams were
         // unreachable so we cannot conclude the path is absent.
         Err(RaceGroupError::NetworkError | RaceGroupError::Timeout) => {},
       }
     }
+    ncro_metrics::get()
+      .narinfo_upstream_attempts_per_resolve
+      .with_label_values(&[if any_not_found {
+        "not_found"
+      } else {
+        "unavailable"
+      }])
+      .observe(attempts_total as f64);
 
     if any_not_found {
       Err(RouterError::NotFound)
@@ -255,13 +330,17 @@ impl Router {
     &self,
     store_hash: &str,
     group: &[String],
-  ) -> Result<RaceResult, RaceGroupError> {
+  ) -> (Result<RaceResult, RaceGroupError>, u64) {
     let mut handles = FuturesUnordered::new();
     for upstream in group {
       let upstream = upstream.clone();
       let store_hash = store_hash.to_string();
       let client = self.inner.client.clone();
+      let gate = self.upstream_gate(&upstream);
       handles.push(tokio::spawn(async move {
+        let Ok(_permit) = gate.acquire_owned().await else {
+          return RaceAttempt::NetworkError { upstream };
+        };
         let start = Instant::now();
         let res = client
           .head(format!("{upstream}/{store_hash}.narinfo"))
@@ -269,19 +348,20 @@ impl Router {
           .await;
         match res {
           Ok(resp) if resp.status().is_success() => {
-            Ok(RaceResult {
+            RaceAttempt::Winner(RaceResult {
               url:        upstream,
               latency_ms: start.elapsed().as_secs_f64() * 1000.0,
             })
           },
-          Ok(_) => Err(false), // 404 / non-success = not found
-          Err(_) => Err(true), // network error
+          Ok(_) => RaceAttempt::NotFound, // 404 / non-success = not found
+          Err(_) => RaceAttempt::NetworkError { upstream }, // network error
         }
       }));
     }
 
     let mut net_errs = 0usize;
     let mut not_founds = 0usize;
+    let mut attempts = 0_u64;
     let deadline = tokio::time::sleep(self.inner.race_timeout);
     tokio::pin!(deadline);
 
@@ -293,9 +373,27 @@ impl Router {
           () = &mut deadline => break None,
           joined = handles.next() => {
               match joined {
-                  Some(Ok(Ok(res))) => break Some(res),
-                  Some(Ok(Err(true)) | Err(_)) => net_errs += 1,
-                  Some(Ok(Err(false))) => not_founds += 1,
+                  Some(Ok(RaceAttempt::Winner(res))) => {
+                      attempts += 1;
+                      ncro_metrics::get().narinfo_upstream_attempts.inc();
+                      break Some(res)
+                  },
+                  Some(Ok(RaceAttempt::NetworkError { upstream })) => {
+                      attempts += 1;
+                      ncro_metrics::get().narinfo_upstream_attempts.inc();
+                      net_errs += 1;
+                      self.mark_cooldown(&upstream);
+                  },
+                  Some(Ok(RaceAttempt::NotFound)) => {
+                      attempts += 1;
+                      ncro_metrics::get().narinfo_upstream_attempts.inc();
+                      not_founds += 1;
+                  },
+                  Some(Err(_)) => {
+                      attempts += 1;
+                      ncro_metrics::get().narinfo_upstream_attempts.inc();
+                      net_errs += 1;
+                  },
                   None => break None,
               }
           }
@@ -303,17 +401,53 @@ impl Router {
     };
 
     if let Some(winner) = winner {
-      return Ok(winner);
+      return (Ok(winner), attempts);
     }
 
     // If there is no winner classify the failure so the caller can decide
     // whether to try the next priority group.
     if net_errs > 0 && not_founds == 0 {
-      Err(RaceGroupError::NetworkError)
+      (Err(RaceGroupError::NetworkError), attempts)
     } else if not_founds > 0 {
-      Err(RaceGroupError::NotFound)
+      (Err(RaceGroupError::NotFound), attempts)
     } else {
-      Err(RaceGroupError::Timeout)
+      (Err(RaceGroupError::Timeout), attempts)
+    }
+  }
+
+  fn cooldown_filtered_candidates(&self, candidates: &[String]) -> Vec<String> {
+    candidates
+      .iter()
+      .filter(|url| !self.in_cooldown(url))
+      .cloned()
+      .collect()
+  }
+
+  fn in_cooldown(&self, url: &str) -> bool {
+    if let Some(until) = self.inner.upstream_cooldown.get(url) {
+      if *until > Instant::now() {
+        return true;
+      }
+    }
+    self.inner.upstream_cooldown.remove(url);
+    false
+  }
+
+  fn mark_cooldown(&self, url: &str) {
+    self.inner.upstream_cooldown.insert(
+      url.to_string(),
+      Instant::now() + self.inner.upstream_cooldown_window,
+    );
+  }
+
+  fn upstream_gate(&self, upstream: &str) -> Arc<Semaphore> {
+    match self.inner.upstream_semaphores.entry(upstream.to_string()) {
+      Entry::Occupied(entry) => Arc::clone(entry.get()),
+      Entry::Vacant(entry) => {
+        Arc::clone(&entry.insert(Arc::new(Semaphore::new(
+          usize::try_from(self.inner.per_upstream_limit).unwrap_or(8),
+        ))))
+      },
     }
   }
 

@@ -3,7 +3,7 @@ use ncro_config::Config;
 use ncro_db::Db;
 use ncro_discovery::Discovery;
 use ncro_health::Prober;
-use ncro_router::Router;
+use ncro_router::{Router, RouterTuning};
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -65,6 +65,12 @@ pub async fn run() -> anyhow::Result<()> {
     cfg.cache.ttl.0,
     std::time::Duration::from_secs(5),
     cfg.cache.negative_ttl.0,
+    RouterTuning {
+      max_concurrent_races:      cfg.cache.mass_query.max_concurrent_races,
+      per_upstream_max_inflight: cfg.cache.mass_query.per_upstream_max_inflight,
+      in_memory_negative_ttl:    cfg.cache.mass_query.in_memory_negative_ttl.0,
+      upstream_cooldown:         cfg.cache.mass_query.upstream_cooldown.0,
+    },
   )?;
   for upstream in &cfg.upstreams {
     if !upstream.public_key.is_empty() {
