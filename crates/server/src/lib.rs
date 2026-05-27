@@ -333,9 +333,12 @@ fn response_from_reqwest(resp: reqwest::Response) -> Response {
   let stream = resp.bytes_stream().map_err(std::io::Error::other);
   let mut out = Response::builder().status(status);
   for name in [
+    "accept-ranges",
     "content-type",
     "content-length",
+    "content-range",
     "content-encoding",
+    "etag",
     "x-nix-signature",
     "cache-control",
     "last-modified",
