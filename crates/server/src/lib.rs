@@ -161,6 +161,7 @@ async fn narinfo(
         req.method().clone(),
         req.headers(),
         format!("{}{}", result.url, req.uri().path()),
+        upstream_auth(&state.upstreams, &result.url),
       )
       .await
     },
@@ -206,6 +207,7 @@ async fn nar(
       req.headers(),
       &entry.upstream_url,
       &path_and_query,
+      upstream_auth(&state.upstreams, &entry.upstream_url),
     )
     .await
   {
@@ -229,6 +231,7 @@ async fn nar(
         req.headers(),
         &h.url,
         &path_and_query,
+        upstream_auth(&state.upstreams, &h.url),
       )
       .await
       {
@@ -237,6 +240,16 @@ async fn nar(
     }
   }
   StatusCode::NOT_FOUND.into_response()
+}
+
+fn upstream_auth(
+  upstreams: &[UpstreamConfig],
+  url: &str,
+) -> Option<(String, Option<String>)> {
+  upstreams
+    .iter()
+    .find(|u| u.url == url && !u.username.is_empty())
+    .map(|u| (u.username.clone(), u.password.clone()))
 }
 
 async fn upstream_urls(state: &AppState) -> Vec<String> {
@@ -261,11 +274,17 @@ async fn try_nar_upstream(
   headers: &HeaderMap,
   upstream: &str,
   path: &str,
+  auth: Option<(String, Option<String>)>,
 ) -> Option<Response> {
-  let resp =
-    upstream_request(client, method, headers, format!("{upstream}{path}"))
-      .await
-      .ok()?;
+  let resp = upstream_request(
+    client,
+    method,
+    headers,
+    format!("{upstream}{path}"),
+    auth,
+  )
+  .await
+  .ok()?;
   if !resp.status().is_success() {
     return None;
   }
@@ -277,8 +296,9 @@ async fn proxy(
   method: Method,
   headers: &HeaderMap,
   url: String,
+  auth: Option<(String, Option<String>)>,
 ) -> Response {
-  match upstream_request(client, method, headers, url).await {
+  match upstream_request(client, method, headers, url, auth).await {
     Ok(resp) => response_from_reqwest(resp),
     Err(err) => {
       tracing::warn!(error = %err, "upstream request failed");
@@ -292,8 +312,12 @@ async fn upstream_request(
   method: Method,
   headers: &HeaderMap,
   url: String,
+  auth: Option<(String, Option<String>)>,
 ) -> reqwest::Result<reqwest::Response> {
   let mut req = client.request(method, url);
+  if let Some((user, pass)) = auth {
+    req = req.basic_auth(user, pass);
+  }
   for name in ["accept", "accept-encoding", "range"] {
     if let Some(value) = headers.get(name) {
       req = req.header(name, value);
