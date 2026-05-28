@@ -133,7 +133,7 @@ mod tests {
       "[server]\ncache_priority = 40\n\n[cache]\nttl = \"2h\"\n",
     )?;
     assert_eq!(cfg.server.cache_priority, 40);
-    assert_eq!(cfg.cache.ttl.0, Duration::from_secs(7200));
+    assert_eq!(cfg.cache.ttl.0, Duration::from_hours(2));
     Ok(())
   }
 
@@ -164,32 +164,27 @@ mod tests {
 
   #[test]
   fn s3_url_custom_endpoint_virtual_addressing() -> Result<(), ConfigError> {
-    assert_eq!(
-      parse_s3_url(
+    assert!(
+      !parse_s3_url(
         "s3://my-cache?endpoint=minio.example.com&addressing-style=virtual"
       )?
-      .force_path_style(),
-      false
+      .force_path_style()
     );
     Ok(())
   }
 
   #[test]
   fn s3_url_aws_path_addressing() -> Result<(), ConfigError> {
-    assert_eq!(
+    assert!(
       parse_s3_url("s3://my-cache?region=eu-west-1&addressing-style=path")?
-        .force_path_style(),
-      true
+        .force_path_style()
     );
     Ok(())
   }
 
   #[test]
   fn s3_url_aws_auto_uses_path_for_dotted_bucket() -> Result<(), ConfigError> {
-    assert_eq!(
-      parse_s3_url("s3://my.cache?region=eu-west-1")?.force_path_style(),
-      true
-    );
+    assert!(parse_s3_url("s3://my.cache?region=eu-west-1")?.force_path_style());
     Ok(())
   }
 
@@ -231,6 +226,17 @@ priority = 10
     let s3 = parse_s3_url(&cfg.upstreams[0].url)?;
     assert_eq!(s3.endpoint_url().as_deref(), Some("http://s3.example.com"));
     Ok(())
+  }
+
+  #[test]
+  #[expect(clippy::expect_used)]
+  fn empty_listen_passes_validation() {
+    // Socket activation supplies the fd at runtime; an empty listen address
+    // must not be rejected at config validation time.
+    let toml = "[[upstreams]]\nurl = \"https://cache.nixos.org\"\npriority = \
+                1\n[server]\nlisten = \"\"\n";
+    let cfg: Config = toml::from_str(toml).expect("parse");
+    assert!(cfg.validate().is_ok());
   }
 
   #[test]
@@ -319,8 +325,8 @@ impl Default for CacheConfig {
     Self {
       db_path:       "/var/lib/ncro/routes.db".to_string(),
       max_entries:   100_000,
-      ttl:           HumanDuration(Duration::from_secs(60 * 60)),
-      negative_ttl:  HumanDuration(Duration::from_secs(10 * 60)),
+      ttl:           HumanDuration(Duration::from_hours(1)),
+      negative_ttl:  HumanDuration(Duration::from_mins(10)),
       latency_alpha: 0.3,
       mass_query:    MassQueryConfig::default(),
     }
@@ -527,11 +533,6 @@ impl Config {
           "upstream[{i}]: public_key must be in 'name:base64(key)' Nix format"
         )));
       }
-    }
-    if self.server.listen.is_empty() {
-      return Err(ConfigError::Validation(
-        "server.listen is empty".to_string(),
-      ));
     }
     if self.server.cache_priority < 1 {
       return Err(ConfigError::Validation(format!(

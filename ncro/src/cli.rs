@@ -7,6 +7,62 @@ use ncro_router::{Router, RouterTuning};
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt};
 
+/// Returns the number of socket-activation fds passed by systemd, or `None`
+/// if socket activation is not in use.
+fn parse_listen_fds(val: Option<&str>) -> Option<u32> {
+  let n: u32 = val?.parse().ok()?;
+  if n >= 1 { Some(n) } else { None }
+}
+
+/// Attempts to inherit a pre-bound TCP socket from systemd (fd 3).
+/// Returns `None` when `LISTEN_FDS` is absent or zero.
+fn inherited_listener() -> Option<std::net::TcpListener> {
+  use std::os::unix::io::FromRawFd;
+  parse_listen_fds(std::env::var("LISTEN_FDS").ok().as_deref())?;
+  // SAFETY: systemd passes a pre-bound TCP socket as fd 3
+  // (SD_LISTEN_FDS_START). The fd is valid for the lifetime of this process
+  // and not owned by anyone else when LISTEN_FDS >= 1.
+  let listener = unsafe { std::net::TcpListener::from_raw_fd(3) };
+  listener.set_nonblocking(true).ok()?;
+  Some(listener)
+}
+
+/// Sends `READY=1` to the systemd notification socket if `$NOTIFY_SOCKET` is
+/// set. Logs a warning on error but does not abort startup.
+fn sd_notify_ready() {
+  use std::{
+    ffi::OsString,
+    os::unix::{ffi::OsStringExt, net::UnixDatagram},
+  };
+
+  let Ok(socket_path) = std::env::var("NOTIFY_SOCKET") else {
+    return;
+  };
+  let sock = match UnixDatagram::unbound() {
+    Ok(s) => s,
+    Err(e) => {
+      tracing::warn!("sd_notify: failed to create socket: {e}");
+      return;
+    },
+  };
+  // NOTIFY_SOCKET may use abstract socket syntax ('@' prefix), which maps
+  // to a null-byte prefix in the sockaddr_un.
+  let result = socket_path.strip_prefix('@').map_or_else(
+    || sock.send_to(b"READY=1\n", &socket_path),
+    |name| {
+      let mut bytes = vec![0u8];
+      bytes.extend_from_slice(name.as_bytes());
+      sock.send_to(
+        b"READY=1\n",
+        std::path::Path::new(&OsString::from_vec(bytes)),
+      )
+    },
+  );
+  if let Err(e) = result {
+    tracing::warn!("sd_notify failed: {e}");
+  }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "ncro", version, about = "Nix Cache Route Optimizer")]
 pub struct Args {
@@ -105,7 +161,7 @@ pub async fn run() -> anyhow::Result<()> {
   let db_for_expiry = db.clone();
   let mut expiry_stop = stop_rx.clone();
   tokio::spawn(async move {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_mins(5));
     loop {
       tokio::select! {
           _ = expiry_stop.changed() => return,
@@ -170,14 +226,20 @@ pub async fn run() -> anyhow::Result<()> {
     cfg.server.read_timeout.0,
     cfg.server.write_timeout.0,
   )?;
-  let listener =
-    TcpListener::bind(normalize_listen(&cfg.server.listen)).await?;
+  let listener = match inherited_listener() {
+    Some(std_listener) => {
+      tracing::info!("socket activation: using inherited listener (fd 3)");
+      TcpListener::from_std(std_listener)?
+    },
+    None => TcpListener::bind(normalize_listen(&cfg.server.listen)).await?,
+  };
   tracing::info!(
     addr = cfg.server.listen,
     upstreams = cfg.upstreams.len(),
     version = env!("CARGO_PKG_VERSION"),
     "ncro listening"
   );
+  sd_notify_ready();
   let server = axum::serve(listener, app).with_graceful_shutdown(async move {
     let _ = tokio::signal::ctrl_c().await;
   });
@@ -202,5 +264,31 @@ fn normalize_listen(listen: &str) -> String {
     format!("0.0.0.0{listen}")
   } else {
     listen.to_string()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn listen_fds_absent() {
+    assert!(parse_listen_fds(None).is_none());
+  }
+
+  #[test]
+  fn listen_fds_zero() {
+    assert!(parse_listen_fds(Some("0")).is_none());
+  }
+
+  #[test]
+  fn listen_fds_one() {
+    assert_eq!(parse_listen_fds(Some("1")), Some(1));
+  }
+
+  #[test]
+  fn listen_fds_invalid() {
+    assert!(parse_listen_fds(Some("not-a-number")).is_none());
+    assert!(parse_listen_fds(Some("")).is_none());
   }
 }
