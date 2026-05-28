@@ -1,0 +1,21 @@
+[package]
+name                  = "ncro-s3"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+description.workspace = true
+homepage.workspace    = true
+repository.workspace  = true
+
+[dependencies]
+aws-config.workspace    = true
+aws-sdk-s3.workspace    = true
+aws-types.workspace     = true
+bytes.workspace         = true
+dashmap.workspace       = true
+futures-util.workspace  = true
+ncro-config.workspace   = true
+thiserror.workspace     = true
+
+[lints]
+workspace = true

@@ -11,6 +11,7 @@ use moka::future::Cache as MokaCache;
 use ncro_db::{Db, DbError, RouteEntry};
 use ncro_health::{Prober, Status};
 use ncro_narinfo::{NarInfo, NarInfoError, parse_public_key};
+use ncro_s3::{S3ClientPool, S3Error};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -26,6 +27,8 @@ pub enum RouterError {
   SignatureVerificationFailed,
   #[error("fetch narinfo: {0}")]
   FetchNarinfo(#[from] reqwest::Error),
+  #[error("S3 request failed: {0}")]
+  S3(#[from] S3Error),
   #[error("parse narinfo: {0}")]
   ParseNarinfo(#[from] NarInfoError),
   #[error(transparent)]
@@ -60,6 +63,7 @@ struct RouterInner {
   race_timeout:             Duration,
   negative_ttl:             Duration,
   client:                   reqwest::Client,
+  s3:                       S3ClientPool,
   upstream_keys:            RwLock<HashMap<String, String>>,
   upstream_auth:            RwLock<HashMap<String, (String, Option<String>)>>,
   inflight:                 DashMap<String, Arc<Mutex<()>>>,
@@ -133,6 +137,7 @@ impl Router {
         race_timeout,
         negative_ttl,
         client: reqwest::Client::builder().timeout(race_timeout).build()?,
+        s3: S3ClientPool::default(),
         upstream_keys: RwLock::new(HashMap::new()),
         upstream_auth: RwLock::new(HashMap::new()),
         inflight: DashMap::new(),
@@ -187,6 +192,14 @@ impl Router {
       .write()
       .await
       .insert(url, (username, password));
+  }
+
+  pub fn register_s3_upstream(
+    &self,
+    upstream: String,
+    config: ncro_config::S3Config,
+  ) {
+    self.inner.s3.register(upstream, config);
   }
 
   /// Resolve a narinfo hash to an upstream URL by checking the route cache
@@ -363,6 +376,7 @@ impl Router {
       let upstream = upstream.clone();
       let store_hash = store_hash.to_string();
       let client = self.inner.client.clone();
+      let s3 = self.inner.s3.clone();
       let gate = self.upstream_gate(&upstream);
       let auth = auth_snapshot.get(&upstream).cloned();
       handles.push(tokio::spawn(async move {
@@ -370,20 +384,36 @@ impl Router {
           return RaceAttempt::NetworkError { upstream };
         };
         let start = Instant::now();
-        let mut req = client.head(format!("{upstream}/{store_hash}.narinfo"));
-        if let Some((user, pass)) = auth {
-          req = req.basic_auth(user, pass);
-        }
-        let res = req.send().await;
-        match res {
-          Ok(resp) if resp.status().is_success() => {
-            RaceAttempt::Winner(RaceResult {
-              url:        upstream,
-              latency_ms: start.elapsed().as_secs_f64() * 1000.0,
-            })
-          },
-          Ok(_) => RaceAttempt::NotFound, // 404 / non-success = not found
-          Err(_) => RaceAttempt::NetworkError { upstream }, // network error
+        if s3.contains(&upstream) {
+          match s3
+            .head_object(&upstream, &format!("{store_hash}.narinfo"))
+            .await
+          {
+            Ok(true) => {
+              RaceAttempt::Winner(RaceResult {
+                url:        upstream,
+                latency_ms: start.elapsed().as_secs_f64() * 1000.0,
+              })
+            },
+            Ok(false) => RaceAttempt::NotFound,
+            Err(_) => RaceAttempt::NetworkError { upstream },
+          }
+        } else {
+          let mut req = client.head(format!("{upstream}/{store_hash}.narinfo"));
+          if let Some((user, pass)) = auth {
+            req = req.basic_auth(user, pass);
+          }
+          let res = req.send().await;
+          match res {
+            Ok(resp) if resp.status().is_success() => {
+              RaceAttempt::Winner(RaceResult {
+                url:        upstream,
+                latency_ms: start.elapsed().as_secs_f64() * 1000.0,
+              })
+            },
+            Ok(_) => RaceAttempt::NotFound, // 404 / non-success = not found
+            Err(_) => RaceAttempt::NetworkError { upstream }, // network error
+          }
         }
       }));
     }
@@ -563,20 +593,28 @@ impl Router {
     upstream: &str,
     store_hash: &str,
   ) -> Result<(Option<Vec<u8>>, String, String, u64), RouterError> {
-    let auth = self.inner.upstream_auth.read().await.get(upstream).cloned();
-    let mut req = self
-      .inner
-      .client
-      .get(format!("{upstream}/{store_hash}.narinfo"));
-    if let Some((user, pass)) = auth {
-      req = req.basic_auth(user, pass);
-    }
-    let resp = req.send().await?;
-    if !resp.status().is_success() {
-      return Err(RouterError::NotFound);
-    }
-    let bytes = resp.bytes().await?;
-    let body = bytes.to_vec();
+    let body = if self.inner.s3.contains(upstream) {
+      self
+        .inner
+        .s3
+        .get_object_bytes(upstream, &format!("{store_hash}.narinfo"))
+        .await?
+        .ok_or(RouterError::NotFound)?
+    } else {
+      let auth = self.inner.upstream_auth.read().await.get(upstream).cloned();
+      let mut req = self
+        .inner
+        .client
+        .get(format!("{upstream}/{store_hash}.narinfo"));
+      if let Some((user, pass)) = auth {
+        req = req.basic_auth(user, pass);
+      }
+      let resp = req.send().await?;
+      if !resp.status().is_success() {
+        return Err(RouterError::NotFound);
+      }
+      resp.bytes().await?.to_vec()
+    };
     let parsed = NarInfo::parse(body.as_slice())?;
     if let Some(pubkey) = self.inner.upstream_keys.read().await.get(upstream)
       && !parsed.verify(pubkey).unwrap_or(false)

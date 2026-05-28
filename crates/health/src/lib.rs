@@ -25,6 +25,7 @@ const fn backoff_interval(base: Duration, consecutive_fails: u32) -> Duration {
 }
 
 use ncro_config::UpstreamConfig;
+use ncro_s3::S3ClientPool;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +82,7 @@ struct ProberInner {
   alpha:          f64,
   table:          RwLock<HashMap<String, UpstreamHealth>>,
   auth:           RwLock<HashMap<String, (String, Option<String>)>>,
+  s3:             S3ClientPool,
   client:         reqwest::Client,
   persist_health: RwLock<Option<PersistHealth>>,
 }
@@ -97,6 +99,7 @@ impl Prober {
         alpha,
         table: RwLock::new(HashMap::new()),
         auth: RwLock::new(HashMap::new()),
+        s3: S3ClientPool::default(),
         client: reqwest::Client::builder()
           .timeout(Duration::from_secs(10))
           .build()?,
@@ -114,6 +117,9 @@ impl Prober {
     {
       let mut table = self.inner.table.write().await;
       for upstream in upstreams {
+        if let Some(s3) = &upstream.s3 {
+          self.inner.s3.register(upstream.url.clone(), s3.clone());
+        }
         table.entry(upstream.url.clone()).or_insert_with(|| {
           UpstreamHealth::new(upstream.url.clone(), upstream.priority)
         });
@@ -257,15 +263,24 @@ impl Prober {
     }
     let auth = self.inner.auth.read().await.get(&url).cloned();
     let start = Instant::now();
-    let mut req = self.inner.client.head(format!("{url}/nix-cache-info"));
-    if let Some((user, pass)) = auth {
-      req = req.basic_auth(user, pass);
-    }
-    let ok = req
-      .send()
-      .await
-      .map(|resp| resp.status().as_u16() == 200)
-      .unwrap_or(false);
+    let ok = if self.inner.s3.contains(&url) {
+      self
+        .inner
+        .s3
+        .head_object(&url, "nix-cache-info")
+        .await
+        .unwrap_or(false)
+    } else {
+      let mut req = self.inner.client.head(format!("{url}/nix-cache-info"));
+      if let Some((user, pass)) = auth {
+        req = req.basic_auth(user, pass);
+      }
+      req
+        .send()
+        .await
+        .map(|resp| resp.status().as_u16() == 200)
+        .unwrap_or(false)
+    };
     if ok {
       self
         .record_latency(&url, start.elapsed().as_secs_f64() * 1000.0)

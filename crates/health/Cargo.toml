@@ -10,6 +10,7 @@ repository.workspace  = true
 
 [dependencies]
 ncro-config.workspace = true
+ncro-s3.workspace     = true
 reqwest               = { workspace = true, features = [ "rustls" ] }
 tokio                 = { workspace = true, features = [ "macros", "sync", "time", "rt" ] }
 

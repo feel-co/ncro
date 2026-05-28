@@ -21,10 +21,14 @@ ncro-mesh      = { path = "./crates/mesh", version = "2.0.3" }
 ncro-metrics   = { path = "./crates/metrics", version = "2.0.3" }
 ncro-narinfo   = { path = "./crates/narinfo", version = "2.0.3" }
 ncro-router    = { path = "./crates/router", version = "2.0.3" }
+ncro-s3        = { path = "./crates/s3", version = "2.0.3" }
 ncro-server    = { path = "./crates/server", version = "2.0.3" }
 
 # Other deps
 anyhow             = "1.0.102"
+aws-config         = { version = "1.8.17", features = [ "behavior-version-latest" ] }
+aws-sdk-s3         = { version = "1.133.0", features = [ "rt-tokio" ] }
+aws-types          = "1.3.16"
 axum               = "0.8.9"
 base64             = "0.22.1"
 bytes              = "1.11.1"

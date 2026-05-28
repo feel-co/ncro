@@ -74,6 +74,9 @@ pub async fn run() -> anyhow::Result<()> {
   )?;
 
   for upstream in &cfg.upstreams {
+    if let Some(s3) = &upstream.s3 {
+      router.register_s3_upstream(upstream.url.clone(), s3.clone());
+    }
     if !upstream.public_key.is_empty() {
       router
         .set_upstream_key(upstream.url.clone(), upstream.public_key.clone())
