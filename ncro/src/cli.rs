@@ -72,11 +72,21 @@ pub async fn run() -> anyhow::Result<()> {
       upstream_cooldown:         cfg.cache.mass_query.upstream_cooldown.0,
     },
   )?;
+
   for upstream in &cfg.upstreams {
     if !upstream.public_key.is_empty() {
       router
         .set_upstream_key(upstream.url.clone(), upstream.public_key.clone())
         .await?;
+    }
+    if !upstream.username.is_empty() {
+      router
+        .set_upstream_auth(
+          upstream.url.clone(),
+          upstream.username.clone(),
+          upstream.password.clone(),
+        )
+        .await;
     }
   }
 

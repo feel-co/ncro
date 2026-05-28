@@ -160,6 +160,20 @@ priority = 10 # lower = preferred on latency ties (within 10%)
 url = "https://nix-community.cachix.org"
 priority = 20
 
+# S3-compatible cache (MinIO, Garage, etc.)
+[[upstreams]]
+url      = "s3://my-bucket?endpoint=minio.example.com&scheme=https"
+priority = 15
+username = "access-key-id"
+password = "secret-access-key"
+
+# Private HTTP cache requiring Basic Auth
+[[upstreams]]
+url      = "https://cache.internal.example.com"
+priority = 5
+username = "ncro"
+password = "hunter2" # it says ******* on my screen it's secure!
+
 [cache]
 db_path = "/var/lib/ncro/routes.db"
 max_entries = 100000 # LRU eviction above this
@@ -203,6 +217,62 @@ gossip_interval = "30s"
 
 Environment overrides are useful for containerized or Systemd deployments where
 you want a fixed config file but still need to tweak one or two settings.
+
+### S3 Upstreams
+
+ncro accepts Nix-style `s3://` URLs in the `url` field and translates them to
+their HTTP(S) equivalent at startup. The rest of the system sees a plain HTTP
+URL. No special runtime path is needed.
+
+Supported query parameters:
+
+<!--markdownlint-disable MD013-->
+
+| Parameter  | Description                                                                                                                         |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `endpoint` | Custom S3-compatible host (MinIO, Garage, Backblaze, …). When set, path-based addressing is used: `{scheme}://{endpoint}/{bucket}`. |
+| `scheme`   | `http` or `https`. Only meaningful with `endpoint`. Default: `https`.                                                               |
+| `region`   | AWS region. Produces virtual-hosted endpoint `{bucket}.s3.{region}.amazonaws.com`.                                                  |
+| `profile`  | AWS credential profile. Accepted but currently ignored; unauthenticated or `username`/`password`-based auth should be used instead. |
+
+<!--markdownlint-enable MD013-->
+
+```toml
+# S3-compatible store with a custom endpoint
+[[upstreams]]
+url      = "s3://my-bucket?endpoint=minio.example.com&scheme=https"
+priority = 15
+username = "access-key-id"
+password = "secret-access-key"
+
+# AWS S3 bucket with explicit region (public or IAM-anonymous)
+[[upstreams]]
+url      = "s3://my-nix-cache?region=eu-west-1"
+priority = 20
+```
+
+> [!NOTE]
+> Authenticated AWS requests using SigV4 (i.e. `profile=`) are not yet
+> supported. For private S3-compatible stores, use `username`/`password` with
+> HTTP Basic Auth. For AWS S3, make the bucket publicly readable or use a
+> pre-signed URL proxy in front of ncro.
+
+### Upstream Authentication
+
+Any upstream can carry `username` and `password` fields. ncro itself sends HTTP
+Basic Auth on every request to that upstream: health probes, narinfo races, and
+NAR streaming.
+
+```toml
+[[upstreams]]
+url      = "https://cache.internal.example.com"
+priority = 5
+username = "ncro"
+password = "hunter2"
+```
+
+`password` is optional. Omit it for token-only schemes where the token goes in
+the username field.
 
 ## NixOS Integration
 
