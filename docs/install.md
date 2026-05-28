@@ -132,7 +132,11 @@ change it.
     enable = true;
     settings = {
       upstreams = [
-        { url = "https://cache.nixos.org"; priority = 10; }
+        {
+          url = "https://cache.nixos.org";
+          priority = 10;
+          public_key = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
+        }
       ];
     };
   };
@@ -140,6 +144,14 @@ change it.
   nix.settings.substituters = [ "http://localhost:8080" ];
 }
 ```
+
+By default, the module appends every non-empty
+`services.ncro.settings.upstreams.*.public_key` value to
+`nix.settings.trusted-public-keys`. If you're managing those keys separately,
+you may set `services.ncro.addUpstreamPublicKeys` to false. The option defaults
+to true.
+
+### Discovery
 
 If you enable discovery or mesh, those settings live in the same `settings`
 block. Discovery is useful when you want ncro to learn peers from the local
@@ -181,10 +193,16 @@ optional environment overrides.
 Point a Nix client at ncro like this:
 
 ```bash
-nix-shell -p hello --substituters http://localhost:8080
+nix-shell -p hello \
+  --substituters http://localhost:8080 \
+  --extra-trusted-public-keys cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 ```
 
-For persistent setup, add the URL to `nix.settings.substituters`.
+> [!TIP]
+> For persistent setup, add the URL to `nix.settings.substituters` and add every
+> upstream cache signing key to `nix.settings.trusted-public-keys`. The NixOS
+> module does this for configured `public_key` values unless
+> `services.ncro.addUpstreamPublicKeys` is disabled.
 
 ## Verification
 
