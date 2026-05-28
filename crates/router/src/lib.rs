@@ -61,6 +61,7 @@ struct RouterInner {
   negative_ttl:             Duration,
   client:                   reqwest::Client,
   upstream_keys:            RwLock<HashMap<String, String>>,
+  upstream_auth:            RwLock<HashMap<String, (String, Option<String>)>>,
   inflight:                 DashMap<String, Arc<Mutex<()>>>,
   lru:                      MokaCache<String, Arc<ResolveResult>>,
   miss_lru:                 MokaCache<String, ()>,
@@ -133,6 +134,7 @@ impl Router {
         negative_ttl,
         client: reqwest::Client::builder().timeout(race_timeout).build()?,
         upstream_keys: RwLock::new(HashMap::new()),
+        upstream_auth: RwLock::new(HashMap::new()),
         inflight: DashMap::new(),
         lru: MokaCache::builder()
           .max_capacity(1024)
@@ -170,6 +172,21 @@ impl Router {
       .await
       .insert(url, public_key);
     Ok(())
+  }
+
+  /// Register HTTP Basic Auth credentials for an upstream URL.
+  pub async fn set_upstream_auth(
+    &self,
+    url: String,
+    username: String,
+    password: Option<String>,
+  ) {
+    self
+      .inner
+      .upstream_auth
+      .write()
+      .await
+      .insert(url, (username, password));
   }
 
   /// Resolve a narinfo hash to an upstream URL by checking the route cache
@@ -340,21 +357,24 @@ impl Router {
     store_hash: &str,
     group: &[String],
   ) -> (Result<RaceResult, RaceGroupError>, u32) {
+    let auth_snapshot = self.inner.upstream_auth.read().await.clone();
     let mut handles = FuturesUnordered::new();
     for upstream in group {
       let upstream = upstream.clone();
       let store_hash = store_hash.to_string();
       let client = self.inner.client.clone();
       let gate = self.upstream_gate(&upstream);
+      let auth = auth_snapshot.get(&upstream).cloned();
       handles.push(tokio::spawn(async move {
         let Ok(_permit) = gate.acquire_owned().await else {
           return RaceAttempt::NetworkError { upstream };
         };
         let start = Instant::now();
-        let res = client
-          .head(format!("{upstream}/{store_hash}.narinfo"))
-          .send()
-          .await;
+        let mut req = client.head(format!("{upstream}/{store_hash}.narinfo"));
+        if let Some((user, pass)) = auth {
+          req = req.basic_auth(user, pass);
+        }
+        let res = req.send().await;
         match res {
           Ok(resp) if resp.status().is_success() => {
             RaceAttempt::Winner(RaceResult {
@@ -543,12 +563,15 @@ impl Router {
     upstream: &str,
     store_hash: &str,
   ) -> Result<(Option<Vec<u8>>, String, String, u64), RouterError> {
-    let resp = self
+    let auth = self.inner.upstream_auth.read().await.get(upstream).cloned();
+    let mut req = self
       .inner
       .client
-      .get(format!("{upstream}/{store_hash}.narinfo"))
-      .send()
-      .await?;
+      .get(format!("{upstream}/{store_hash}.narinfo"));
+    if let Some((user, pass)) = auth {
+      req = req.basic_auth(user, pass);
+    }
+    let resp = req.send().await?;
     if !resp.status().is_success() {
       return Err(RouterError::NotFound);
     }

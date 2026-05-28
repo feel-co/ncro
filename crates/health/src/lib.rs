@@ -80,6 +80,7 @@ pub struct Prober {
 struct ProberInner {
   alpha:          f64,
   table:          RwLock<HashMap<String, UpstreamHealth>>,
+  auth:           RwLock<HashMap<String, (String, Option<String>)>>,
   client:         reqwest::Client,
   persist_health: RwLock<Option<PersistHealth>>,
 }
@@ -95,6 +96,7 @@ impl Prober {
       inner: Arc::new(ProberInner {
         alpha,
         table: RwLock::new(HashMap::new()),
+        auth: RwLock::new(HashMap::new()),
         client: reqwest::Client::builder()
           .timeout(Duration::from_secs(10))
           .build()?,
@@ -109,11 +111,23 @@ impl Prober {
   }
 
   pub async fn init_upstreams(&self, upstreams: &[UpstreamConfig]) {
-    let mut table = self.inner.table.write().await;
-    for upstream in upstreams {
-      table.entry(upstream.url.clone()).or_insert_with(|| {
-        UpstreamHealth::new(upstream.url.clone(), upstream.priority)
-      });
+    {
+      let mut table = self.inner.table.write().await;
+      for upstream in upstreams {
+        table.entry(upstream.url.clone()).or_insert_with(|| {
+          UpstreamHealth::new(upstream.url.clone(), upstream.priority)
+        });
+      }
+    }
+    {
+      let mut auth = self.inner.auth.write().await;
+      for upstream in upstreams {
+        if !upstream.username.is_empty() {
+          auth.entry(upstream.url.clone()).or_insert_with(|| {
+            (upstream.username.clone(), upstream.password.clone())
+          });
+        }
+      }
     }
   }
 
@@ -241,11 +255,13 @@ impl Prober {
     if !self.inner.table.read().await.contains_key(&url) {
       return;
     }
+    let auth = self.inner.auth.read().await.get(&url).cloned();
     let start = Instant::now();
-    let ok = self
-      .inner
-      .client
-      .head(format!("{url}/nix-cache-info"))
+    let mut req = self.inner.client.head(format!("{url}/nix-cache-info"));
+    if let Some((user, pass)) = auth {
+      req = req.basic_auth(user, pass);
+    }
+    let ok = req
       .send()
       .await
       .map(|resp| resp.status().as_u16() == 200)
@@ -427,14 +443,16 @@ mod tests {
     let p = Prober::new(0.3)?;
     p.init_upstreams(&[
       UpstreamConfig {
-        url:        "https://fast.com".into(),
-        priority:   1,
+        url: "https://fast.com".into(),
+        priority: 1,
         public_key: String::new(),
+        ..Default::default()
       },
       UpstreamConfig {
-        url:        "https://down.com".into(),
-        priority:   1,
+        url: "https://down.com".into(),
+        priority: 1,
         public_key: String::new(),
+        ..Default::default()
       },
     ])
     .await;
@@ -453,14 +471,16 @@ mod tests {
     let p = Prober::new(0.3)?;
     p.init_upstreams(&[
       UpstreamConfig {
-        url:        "https://high-priority.com".into(),
-        priority:   1,
+        url: "https://high-priority.com".into(),
+        priority: 1,
         public_key: String::new(),
+        ..Default::default()
       },
       UpstreamConfig {
-        url:        "https://low-priority.com".into(),
-        priority:   10,
+        url: "https://low-priority.com".into(),
+        priority: 10,
         public_key: String::new(),
+        ..Default::default()
       },
     ])
     .await;

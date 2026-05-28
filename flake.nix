@@ -33,6 +33,7 @@
     in {
       p2p-discovery = pkgs.callPackage ./nix/tests/p2p.nix {inherit self;};
       e2e = pkgs.callPackage ./nix/tests/e2e.nix {inherit self;};
+      s3 = pkgs.callPackage ./nix/tests/s3.nix {inherit self;};
     });
 
     # Provides the default formatter for 'nix fmt'.
