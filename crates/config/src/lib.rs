@@ -23,6 +23,7 @@ pub enum ConfigError {
 /// - `scheme`   - `http` or `https` (default `https`; only relevant with
 ///   `endpoint`)
 /// - `region`   - AWS region; used to build the virtual-hosted AWS endpoint
+/// - `addressing-style` - `auto`, `path`, or `virtual`
 /// - `profile`  - credential profile (auth not yet supported; parameter
 ///   ignored)
 ///
@@ -42,28 +43,49 @@ fn s3_url_to_http(raw: &str) -> Result<String, ConfigError> {
   let mut endpoint: Option<String> = None;
   let mut scheme = "https".to_string();
   let mut region: Option<String> = None;
+  let mut addressing_style = "auto".to_string();
 
   for (key, value) in parsed.query_pairs() {
     match key.as_ref() {
       "endpoint" => endpoint = Some(value.into_owned()),
       "scheme" => scheme = value.into_owned(),
       "region" => region = Some(value.into_owned()),
+      "addressing-style" => addressing_style = value.into_owned(),
       _ => {},
     }
   }
 
-  Ok(endpoint.map_or_else(
-    || {
-      region.map_or_else(
+  match (endpoint, addressing_style.as_str()) {
+    (Some(ep), "virtual") => Ok(format!("{scheme}://{bucket}.{ep}")),
+    (Some(ep), "auto" | "path") => Ok(format!("{scheme}://{ep}/{bucket}")),
+    (None, "path") => {
+      let host = region.map_or_else(
+        || "s3.amazonaws.com".to_string(),
+        |r| format!("s3.{r}.amazonaws.com"),
+      );
+      Ok(format!("https://{host}/{bucket}"))
+    },
+    (None, "auto") if bucket.contains('.') => {
+      let host = region.map_or_else(
+        || "s3.amazonaws.com".to_string(),
+        |r| format!("s3.{r}.amazonaws.com"),
+      );
+      Ok(format!("https://{host}/{bucket}"))
+    },
+    (None, "auto" | "virtual") => {
+      Ok(region.map_or_else(
         // AWS S3 without region: region-agnostic global endpoint.
         || format!("https://{bucket}.s3.amazonaws.com"),
         // AWS S3 with known region: virtual-hosted-style endpoint.
         |r| format!("https://{bucket}.s3.{r}.amazonaws.com"),
-      )
+      ))
     },
-    // S3-compatible store with explicit host: use path-based addressing.
-    |ep| format!("{scheme}://{ep}/{bucket}"),
-  ))
+    (_, other) => {
+      Err(ConfigError::Validation(format!(
+        "s3 upstream {raw:?}: unsupported addressing-style {other:?}"
+      )))
+    },
+  }
 }
 
 #[cfg(test)]
@@ -109,6 +131,42 @@ mod tests {
       "https://minio.example.com/my-cache"
     );
     Ok(())
+  }
+
+  #[test]
+  fn s3_url_custom_endpoint_virtual_addressing() -> Result<(), ConfigError> {
+    assert_eq!(
+      s3_url_to_http(
+        "s3://my-cache?endpoint=minio.example.com&addressing-style=virtual"
+      )?,
+      "https://my-cache.minio.example.com"
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn s3_url_aws_path_addressing() -> Result<(), ConfigError> {
+    assert_eq!(
+      s3_url_to_http("s3://my-cache?region=eu-west-1&addressing-style=path")?,
+      "https://s3.eu-west-1.amazonaws.com/my-cache"
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn s3_url_aws_auto_uses_path_for_dotted_bucket() -> Result<(), ConfigError> {
+    assert_eq!(
+      s3_url_to_http("s3://my.cache?region=eu-west-1")?,
+      "https://s3.eu-west-1.amazonaws.com/my.cache"
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn s3_url_rejects_unknown_addressing_style() {
+    assert!(
+      s3_url_to_http("s3://my-cache?addressing-style=unsupported").is_err()
+    );
   }
 
   #[test]
