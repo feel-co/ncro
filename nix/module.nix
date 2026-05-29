@@ -2,6 +2,7 @@
   config,
   pkgs,
   lib,
+  necroPackage,
   ...
 }: let
   inherit (lib.modules) mkIf;
@@ -37,7 +38,7 @@ in {
 
     package = mkOption {
       type = package;
-      default = pkgs.callPackage ./package.nix {};
+      default = necroPackage;
       defaultText = literalExpression "inputs.ncro.packages.$${system}.ncro";
       description = "The ncro package to use.";
       example = literalExpression "inputs.ncro.packages.$${system}.ncro";
@@ -79,8 +80,7 @@ in {
   };
 
   config = mkIf cfg.enable {
-    nix.settings.trusted-public-keys =
-      mkIf cfg.addUpstreamPublicKeys (lib.mkAfter upstreamPublicKeys);
+    nix.settings.trusted-public-keys = mkIf cfg.addUpstreamPublicKeys (lib.mkAfter upstreamPublicKeys);
 
     systemd.services.ncro = {
       description = "Nix Cache Route Optimizer";

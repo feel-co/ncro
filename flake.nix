@@ -11,30 +11,41 @@
     pkgsForEach = system: nixpkgs.legacyPackages.${system};
   in {
     nixosModules = {
-      ncro = ./nix/module.nix;
-      default = self.nixosModules.ncro;
+      default = {pkgs, ...} @ args:
+        import ./nix/module.nix (
+          args
+          // {
+            ncroPackage = self.packages.${pkgs.system}.ncro;
+          }
+        );
     };
 
-    packages = forEachSystem (system: let
-      pkgs = pkgsForEach system;
-    in {
-      ncro = pkgs.callPackage ./nix/package.nix {};
-      default = self.packages.${system}.ncro;
-    });
+    packages = forEachSystem (
+      system: let
+        pkgs = pkgsForEach system;
+      in rec {
+        ncro = pkgs.callPackage ./nix/package.nix {};
+        default = ncro;
+      }
+    );
 
-    devShells = forEachSystem (system: let
-      pkgs = pkgsForEach system;
-    in {
-      default = pkgs.callPackage ./nix/shell.nix {};
-    });
+    devShells = forEachSystem (
+      system: let
+        pkgs = pkgsForEach system;
+      in {
+        default = pkgs.callPackage ./nix/shell.nix {};
+      }
+    );
 
-    checks = forEachSystem (system: let
-      pkgs = pkgsForEach system;
-    in {
-      p2p-discovery = pkgs.callPackage ./nix/tests/p2p.nix {inherit self;};
-      e2e = pkgs.callPackage ./nix/tests/e2e.nix {inherit self;};
-      s3 = pkgs.callPackage ./nix/tests/s3.nix {inherit self;};
-    });
+    checks = forEachSystem (
+      system: let
+        pkgs = pkgsForEach system;
+      in {
+        p2p-discovery = pkgs.callPackage ./nix/tests/p2p.nix {inherit self;};
+        e2e = pkgs.callPackage ./nix/tests/e2e.nix {inherit self;};
+        s3 = pkgs.callPackage ./nix/tests/s3.nix {inherit self;};
+      }
+    );
 
     # Provides the default formatter for 'nix fmt'.
     formatter = forEachSystem (

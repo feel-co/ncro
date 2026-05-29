@@ -1,2 +1,4 @@
 # Build output
 /target
+.direnv
+result
