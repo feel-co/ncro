@@ -271,14 +271,27 @@ impl Prober {
         .await
         .unwrap_or(false)
     } else {
-      let mut req = self.inner.client.head(format!("{url}/nix-cache-info"));
-      if let Some((user, pass)) = auth {
-        req = req.basic_auth(user, pass);
+      let url_path = format!("{url}/nix-cache-info");
+      let mut head_req = self.inner.client.head(&url_path);
+      if let Some((user, pass)) = auth.clone() {
+        head_req = head_req.basic_auth(user, pass);
       }
-      req
+      let head_ok = head_req
         .send()
         .await
-        .is_ok_and(|resp| resp.status().as_u16() == 200)
+        .is_ok_and(|resp| resp.status().as_u16() == 200);
+      if head_ok {
+        true
+      } else {
+        let mut get_req = self.inner.client.get(&url_path);
+        if let Some((user, pass)) = auth {
+          get_req = get_req.basic_auth(user, pass);
+        }
+        get_req
+          .send()
+          .await
+          .is_ok_and(|resp| resp.status().as_u16() == 200)
+      }
     };
     if ok {
       self

@@ -73,7 +73,10 @@ in
         systemd.services.nix-serve-ng = {
           description = "nix-serve-ng binary cache";
           wantedBy = ["multi-user.target"];
-          after = ["setup-cache.service" "network.target"];
+          after = [
+            "setup-cache.service"
+            "network.target"
+          ];
           requires = ["setup-cache.service"];
           environment.NIX_SECRET_KEY_FILE = "/etc/nix/cache-key.sec";
           serviceConfig = {
@@ -137,7 +140,10 @@ in
 
       # First ncro instance. Proxies to both binary caches.
       host = {...}: {
-        imports = [self.nixosModules.ncro commonBase];
+        imports = [
+          self.nixosModules.ncro
+          commonBase
+        ];
 
         nix.settings.trusted-substituters = ["http://localhost:8080"];
 
@@ -168,7 +174,10 @@ in
       # exercising the two-hop path:
       # secondary --> host --> bincache.
       secondary = {...}: {
-        imports = [self.nixosModules.ncro commonBase];
+        imports = [
+          self.nixosModules.ncro
+          commonBase
+        ];
 
         nix.settings.trusted-substituters = ["http://localhost:8080"];
 
@@ -197,6 +206,16 @@ in
       def ncro_health(node):
           out = node.succeed("curl -sf http://localhost:8080/health")
           return json.loads(out)
+
+      def ncro_health_get_fallback(node, url_pattern):
+          # some caches reject HEAD, 0 fails here means fallback worked and reset count.
+          h = ncro_health(node)
+          for u in h["upstreams"]:
+              if url_pattern in u["url"]:
+                  assert u["consecutive_fails"] == 0, \
+                    f"{url_pattern} probe expected 0 fails (GET fallback), got {u['consecutive_fails']}"
+                  return
+          assert False, f"{url_pattern} not found in {node.name} upstreams"
 
       def store_hash(path):
           # /nix/store/<hash>-<name> → <hash>
@@ -310,15 +329,8 @@ in
           assert "narinfo_cache_hits" in metrics, \
               f"host ncro: cache hit metric not found in: {metrics[:300]!r}"
 
-      with subtest("host health endpoint lists both upstreams"):
-          h = ncro_health(host)
-          assert "status" in h and "upstreams" in h, \
-              f"host /health missing fields: {h!r}"
-          upstream_urls = [u["url"] for u in h["upstreams"]]
-          assert any("bincache1" in u for u in upstream_urls), \
-              f"bincache1 not in host upstreams: {upstream_urls}"
-          assert any("bincache2" in u for u in upstream_urls), \
-              f"bincache2 not in host upstreams: {upstream_urls}"
+      with subtest("bincache2 probe succeeds with HEAD -> GET fallback"):
+          ncro_health_get_fallback(host, "bincache2")
 
       with subtest("secondary health endpoint lists host as upstream"):
           h = ncro_health(secondary)
