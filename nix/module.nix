@@ -7,12 +7,26 @@
   inherit (lib.modules) mkIf;
   inherit (lib.options) mkOption mkEnableOption literalExpression;
   inherit (lib.types) bool package;
+  inherit (lib) optionals optionalAttrs;
 
   tomlFormat = pkgs.formats.toml {};
   tomlType = tomlFormat.type;
 
   cfg = config.services.ncro;
   configFile = tomlFormat.generate "ncro.toml" cfg.settings;
+
+  # Normalize a ncro listen address (`:port` shorthand) to the
+  # `host:port` format expected by systemd's ListenStream.
+  toListenStream = addr: let
+    raw =
+      if addr == ""
+      then ":8080"
+      else addr;
+  in
+    if lib.hasPrefix ":" raw
+    then "0.0.0.0${raw}"
+    else raw;
+
   upstreamPublicKeys = lib.pipe (cfg.settings.upstreams or []) [
     (builtins.map (upstream: upstream.public_key or ""))
     (builtins.filter (key: key != ""))
@@ -32,6 +46,24 @@ in {
         This keeps Nix client signature validation aligned with the upstream
         caches that ncro is allowed to route to. Disable this if you manage Nix
         trusted public keys separately.
+      '';
+    };
+
+    socketActivation = mkOption {
+      type = bool;
+      default = false;
+      description = ''
+        Enable systemd socket activation for ncro. When enabled, systemd
+        creates and holds the listening TCP socket, starting ncro on the first
+        incoming connection.
+
+        ncro signals readiness via {manpage}`sd_notify(3)`, so downstream units
+        that declare `After = ncro.service` will not start until ncro is actually
+        accepting connections.
+
+        A {manpage}`systemd.socket(5)` unit `ncro.socket` is created automatically.
+        The listen address is taken from {option}`services.ncro.settings.server.listen`
+        if set, defaulting to `:8080`.
       '';
     };
 
@@ -82,42 +114,57 @@ in {
     nix.settings.trusted-public-keys =
       mkIf cfg.addUpstreamPublicKeys (lib.mkAfter upstreamPublicKeys);
 
+    systemd.sockets.ncro = mkIf cfg.socketActivation {
+      wantedBy = ["sockets.target"];
+      socketConfig.ListenStream =
+        toListenStream (cfg.settings.server.listen or "");
+    };
+
     systemd.services.ncro = {
       description = "Nix Cache Route Optimizer";
       wantedBy = ["multi-user.target"];
-      after = ["network.target"];
-      serviceConfig = {
-        ExecStart = "${lib.getExe' cfg.package "ncro"} --config ${configFile}";
-        DynamicUser = true;
-        StateDirectory = "ncro";
-        Restart = "on-failure";
-        RestartSec = "5s";
+      after =
+        if cfg.socketActivation
+        then ["ncro.socket"]
+        else ["network.target"];
+      requires = optionals cfg.socketActivation ["ncro.socket"];
+      serviceConfig =
+        {
+          ExecStart = "${lib.getExe' cfg.package "ncro"} --config ${configFile}";
+          DynamicUser = true;
+          StateDirectory = "ncro";
+          Restart = "on-failure";
+          RestartSec = "5s";
 
-        # Hardening
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        ProtectProc = "invisible";
-        ProtectHostname = true;
-        ProtectClock = true;
-        ProtectControlGroups = true;
-        ProtectKernelLogs = true;
-        ProtectKernelTunables = true;
-        RestrictRealtime = true;
-        CapabilityBoundingSet = "";
-        RestrictAddressFamilies = [
-          "AF_INET"
-          "AF_INET6"
-          "AF_NETLINK" # required by mdns-sd and system resolver
-        ];
-        RestrictNamespaces = true;
-        LockPersonality = true;
-        MemoryDenyWriteExecute = true;
-        SystemCallFilter = ["@system-service"];
-        SystemCallArchitectures = "native";
-      };
+          # Hardening
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          ProtectProc = "invisible";
+          ProtectHostname = true;
+          ProtectClock = true;
+          ProtectControlGroups = true;
+          ProtectKernelLogs = true;
+          ProtectKernelTunables = true;
+          RestrictRealtime = true;
+          CapabilityBoundingSet = "";
+          RestrictAddressFamilies =
+            [
+              "AF_INET"
+              "AF_INET6"
+              "AF_NETLINK" # required by mdns-sd and system resolver
+            ]
+            # sd_notify uses a Unix datagram socket to signal readiness.
+            ++ optionals cfg.socketActivation ["AF_UNIX"];
+          RestrictNamespaces = true;
+          LockPersonality = true;
+          MemoryDenyWriteExecute = true;
+          SystemCallFilter = ["@system-service"];
+          SystemCallArchitectures = "native";
+        }
+        // optionalAttrs cfg.socketActivation {Type = "notify";};
     };
   };
 }
