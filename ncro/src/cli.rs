@@ -15,13 +15,20 @@ fn parse_listen_fds(val: Option<&str>) -> Option<u32> {
 }
 
 /// Attempts to inherit a pre-bound TCP socket from systemd (fd 3).
-/// Returns `None` when `LISTEN_FDS` is absent or zero.
+/// Returns `None` when `LISTEN_FDS` is absent or zero, or when `LISTEN_PID`
+/// does not match this process (guards against inheriting stale env vars).
 fn inherited_listener() -> Option<std::net::TcpListener> {
   use std::os::unix::io::FromRawFd;
   parse_listen_fds(std::env::var("LISTEN_FDS").ok().as_deref())?;
+  // Confirm the fds are intended for this process, as required by the
+  // sd_listen_fds(3) protocol.
+  let our_pid = std::process::id().to_string();
+  if std::env::var("LISTEN_PID").ok().as_deref() != Some(our_pid.as_str()) {
+    return None;
+  }
   // SAFETY: systemd passes a pre-bound TCP socket as fd 3
   // (SD_LISTEN_FDS_START). The fd is valid for the lifetime of this process
-  // and not owned by anyone else when LISTEN_FDS >= 1.
+  // and not owned by anyone else when LISTEN_FDS >= 1 and LISTEN_PID matches.
   let listener = unsafe { std::net::TcpListener::from_raw_fd(3) };
   listener.set_nonblocking(true).ok()?;
   Some(listener)

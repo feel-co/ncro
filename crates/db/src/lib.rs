@@ -488,7 +488,7 @@ mod tests {
       .ok_or(sqlx::Error::RowNotFound)?;
     assert_eq!(got.upstream_url, entry.upstream_url);
     assert!(db.get_route_by_nar_url("nar/abc.nar.xz").await?.is_some());
-    db.set_negative("missing", Duration::from_secs(60)).await?;
+    db.set_negative("missing", Duration::from_mins(1)).await?;
     assert!(db.is_negative("missing").await?);
     Ok(())
   }

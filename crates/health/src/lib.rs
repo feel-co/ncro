@@ -278,8 +278,7 @@ impl Prober {
       req
         .send()
         .await
-        .map(|resp| resp.status().as_u16() == 200)
-        .unwrap_or(false)
+        .is_ok_and(|resp| resp.status().as_u16() == 200)
     };
     if ok {
       self

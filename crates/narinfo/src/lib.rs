@@ -241,12 +241,11 @@ impl NarInfo {
             }
           })?;
         },
-        "References" => {
-          if !value.is_empty() {
+        "References"
+          if !value.is_empty() => {
             narinfo.references =
               value.split_whitespace().map(str::to_string).collect();
-          }
-        },
+          },
         "Deriver" => narinfo.deriver = value.to_string(),
         "Sig" => narinfo.sig.push(value.to_string()),
         "CA" => narinfo.ca = value.to_string(),

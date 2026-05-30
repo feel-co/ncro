@@ -647,13 +647,13 @@ mod tests {
     Router::new(
       db,
       prober,
-      Duration::from_secs(3600),
+      Duration::from_hours(1),
       Duration::from_secs(5),
-      Duration::from_secs(600),
+      Duration::from_mins(10),
       RouterTuning {
         max_concurrent_races:      4,
         per_upstream_max_inflight: 2,
-        in_memory_negative_ttl:    Duration::from_secs(300),
+        in_memory_negative_ttl:    Duration::from_mins(5),
         upstream_cooldown:         cooldown,
       },
     )
@@ -683,7 +683,7 @@ mod tests {
 
   #[tokio::test]
   async fn mark_cooldown_makes_upstream_unavailable() {
-    let router = make_router(Duration::from_secs(60)).await;
+    let router = make_router(Duration::from_mins(1)).await;
     let url = "https://cache.example.com";
     assert!(!router.in_cooldown(url));
     router.mark_cooldown(url);
@@ -701,7 +701,7 @@ mod tests {
 
   #[tokio::test]
   async fn cooldown_filter_excludes_cooled_down_upstream() {
-    let router = make_router(Duration::from_secs(60)).await;
+    let router = make_router(Duration::from_mins(1)).await;
     let hot = "https://hot.example.com".to_string();
     let cold = "https://cold.example.com".to_string();
     router.mark_cooldown(&cold);
@@ -711,7 +711,7 @@ mod tests {
 
   #[tokio::test]
   async fn cooldown_filter_passes_all_when_none_cooled() {
-    let router = make_router(Duration::from_secs(60)).await;
+    let router = make_router(Duration::from_mins(1)).await;
     let candidates = vec![
       "https://a.example.com".to_string(),
       "https://b.example.com".to_string(),
@@ -721,7 +721,7 @@ mod tests {
 
   #[tokio::test]
   async fn upstream_gate_is_stable_per_key() {
-    let router = make_router(Duration::from_secs(60)).await;
+    let router = make_router(Duration::from_mins(1)).await;
     let url = "https://cache.example.com";
     let gate1 = router.upstream_gate(url);
     let gate2 = router.upstream_gate(url);
@@ -730,7 +730,7 @@ mod tests {
 
   #[tokio::test]
   async fn upstream_gate_is_distinct_per_upstream() {
-    let router = make_router(Duration::from_secs(60)).await;
+    let router = make_router(Duration::from_mins(1)).await;
     let gate_a = router.upstream_gate("https://a.example.com");
     let gate_b = router.upstream_gate("https://b.example.com");
     assert!(!Arc::ptr_eq(&gate_a, &gate_b));
@@ -738,7 +738,7 @@ mod tests {
 
   #[tokio::test]
   async fn upstream_gate_semaphore_capacity_matches_tuning() {
-    let router = make_router(Duration::from_secs(60)).await;
+    let router = make_router(Duration::from_mins(1)).await;
     let gate = router.upstream_gate("https://cache.example.com");
     assert_eq!(gate.available_permits(), 2);
   }
