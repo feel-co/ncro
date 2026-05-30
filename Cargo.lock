@@ -2262,6 +2262,7 @@ version = "2.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "hex",
  "rand 0.10.1",
  "thiserror 2.0.18",
 ]
