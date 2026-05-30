@@ -2169,7 +2169,7 @@ dependencies = [
 
 [[package]]
 name = "ncro"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-config"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "hex",
  "humantime-serde",
@@ -2202,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-db"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2213,7 +2213,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-discovery"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "mdns-sd",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-health"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "ncro-config",
  "ncro-s3",
@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-mesh"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -2251,14 +2251,14 @@ dependencies = [
 
 [[package]]
 name = "ncro-metrics"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "prometheus",
 ]
 
 [[package]]
 name = "ncro-narinfo"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-router"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-s3"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "ncro-server"
-version = "2.0.3"
+version = "2.1.0"
 dependencies = [
  "axum",
  "bytes",
