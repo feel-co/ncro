@@ -15,6 +15,13 @@
     echo "e2e payload 2: harmonia backend" > "$out/data"
   '';
 
+  # Present in both backends. The filtered ncro node rejects this path on the
+  # priority-1 backend, so a successful response must come from backend 2.
+  filterPayload = pkgs.runCommandLocal "ncro-e2e-filter-payload" {} ''
+    mkdir -p "$out"
+    echo "e2e filter payload: available on both backends" > "$out/data"
+  '';
+
   cacheKey1Name = "ncro-e2e-cache1";
   cacheKey2Name = "ncro-e2e-cache2";
 
@@ -39,7 +46,7 @@ in
       }: {
         imports = [commonBase];
 
-        system.extraDependencies = [payload1];
+        system.extraDependencies = [payload1 filterPayload];
 
         systemd.services.setup-cache = {
           description = "Generate signing key and sign e2e payload 1";
@@ -64,6 +71,9 @@ in
               ${config.nix.package}/bin/nix store sign \
                 --key-file /etc/nix/cache-key.sec \
                 "${payload1}"
+              ${config.nix.package}/bin/nix store sign \
+                --key-file /etc/nix/cache-key.sec \
+                "${filterPayload}"
             '';
           };
         };
@@ -96,7 +106,7 @@ in
       }: {
         imports = [commonBase];
 
-        system.extraDependencies = [payload2];
+        system.extraDependencies = [payload2 filterPayload];
 
         systemd.services.setup-cache = {
           description = "Generate signing key and sign e2e payload 2";
@@ -109,6 +119,7 @@ in
             RemainAfterExit = true;
             ExecStart = pkgs.writeShellScript "setup-cache2" ''
               set -euo pipefail
+
               mkdir -p /etc/nix
               if [ ! -f /etc/nix/cache-key.sec ]; then
                 ${config.nix.package}/bin/nix-store \
@@ -116,10 +127,12 @@ in
                   /etc/nix/cache-key.sec \
                   /etc/nix/cache-key.pub
               fi
+
               chmod 644 /etc/nix/cache-key.pub /etc/nix/cache-key.sec
-              ${config.nix.package}/bin/nix store sign \
-                --key-file /etc/nix/cache-key.sec \
-                "${payload2}"
+              for path in "${payload2}" "${filterPayload}"; do
+                ${config.nix.package}/bin/nix store sign "$path" \
+                  --key-file /etc/nix/cache-key.sec
+              done
             '';
           };
         };
@@ -139,7 +152,7 @@ in
       };
 
       # First ncro instance. Proxies to both binary caches.
-      host = {...}: {
+      host = {
         imports = [
           self.nixosModules.ncro
           commonBase
@@ -173,7 +186,7 @@ in
       # Second ncro instance. Proxies exclusively through host's ncro,
       # exercising the two-hop path:
       # secondary --> host --> bincache.
-      secondary = {...}: {
+      secondary = {
         imports = [
           self.nixosModules.ncro
           commonBase
@@ -191,6 +204,45 @@ in
                 priority = 1;
               }
             ];
+            cache = {
+              ttl = "5m";
+              negative_ttl = "30s";
+            };
+          };
+        };
+      };
+
+      # Third ncro instance. Both upstreams can serve filterPayload, but the
+      # priority-1 upstream is configured to allow only payload1 by name. This
+      # exercises post-narinfo filter rejection and fallback to the next backend.
+      filtered = {
+        imports = [
+          self.nixosModules.ncro
+          commonBase
+        ];
+
+        services.ncro = {
+          enable = true;
+          settings = {
+            server.listen = ":8080";
+            upstreams = [
+              {
+                url = "http://bincache1:5000";
+                priority = 1;
+                filters = [
+                  {
+                    action = "allow";
+                    field = "name";
+                    pattern = "ncro-e2e-payload1*";
+                  }
+                ];
+              }
+              {
+                url = "http://bincache2:5000";
+                priority = 2;
+              }
+            ];
+
             cache = {
               ttl = "5m";
               negative_ttl = "30s";
@@ -223,25 +275,29 @@ in
 
       payload1_path = "${payload1}"
       payload2_path = "${payload2}"
+      filter_payload_path = "${filterPayload}"
       hash1 = store_hash(payload1_path)
       hash2 = store_hash(payload2_path)
+      filter_hash = store_hash(filter_payload_path)
 
-      with subtest("boot all nodes"):
-          start_all()
+      start_all()
 
-          bincache1.wait_for_unit("setup-cache.service")
-          bincache1.wait_for_unit("nix-serve-ng.service")
-          bincache1.wait_for_open_port(5000)
+      bincache1.wait_for_unit("setup-cache.service")
+      bincache1.wait_for_unit("nix-serve-ng.service")
+      bincache1.wait_for_open_port(5000)
 
-          bincache2.wait_for_unit("setup-cache.service")
-          bincache2.wait_for_unit("harmonia.service")
-          bincache2.wait_for_open_port(5000)
+      bincache2.wait_for_unit("setup-cache.service")
+      bincache2.wait_for_unit("harmonia.service")
+      bincache2.wait_for_open_port(5000)
 
-          host.wait_for_unit("ncro.service")
-          host.wait_for_open_port(8080)
+      host.wait_for_unit("ncro.service")
+      host.wait_for_open_port(8080)
 
-          secondary.wait_for_unit("ncro.service")
-          secondary.wait_for_open_port(8080)
+      secondary.wait_for_unit("ncro.service")
+      secondary.wait_for_open_port(8080)
+
+      filtered.wait_for_unit("ncro.service")
+      filtered.wait_for_open_port(8080)
 
       with subtest("binary caches serve nix-cache-info"):
           for node, port in ((bincache1, 5000), (bincache2, 5000)):
@@ -266,7 +322,7 @@ in
           assert "Sig: ${cacheKey2Name}:" in out2, \
               f"bincache2 narinfo missing signature: {out2!r}"
 
-      with subtest("cross-backend: each cache returns 404 for the other's payload"):
+      with subtest("each cache returns 404 for the other's payload"):
           bincache1.fail(f"curl -sf http://localhost:5000/{hash2}.narinfo")
           bincache2.fail(f"curl -sf http://localhost:5000/{hash1}.narinfo")
 
@@ -279,6 +335,17 @@ in
           out = host.succeed(f"curl -sf http://localhost:8080/{hash2}.narinfo")
           assert "StorePath" in out, \
               f"host ncro did not proxy hash2 narinfo: {out!r}"
+
+      with subtest("path filters reject disallowed priority-1 narinfo"):
+          out = filtered.succeed(f"curl -sf http://localhost:8080/{filter_hash}.narinfo")
+          assert "StorePath" in out, \
+              f"filtered ncro did not serve shared payload narinfo: {out!r}"
+          assert "${filterPayload}" in out, \
+              f"filtered ncro returned wrong store path: {out!r}"
+          assert "Sig: ${cacheKey2Name}:" in out, \
+              f"filtered ncro did not fall back to backend 2 after filter rejection: {out!r}"
+          assert "Sig: ${cacheKey1Name}:" not in out, \
+              f"filtered ncro accepted backend 1 despite path filter: {out!r}"
 
       with subtest("secondary ncro proxies both narinfos through host (two-hop)"):
           out1 = secondary.succeed(f"curl -sf http://localhost:8080/{hash1}.narinfo")
