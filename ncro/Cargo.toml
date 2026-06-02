@@ -11,8 +11,8 @@ readme.workspace      = true
 [dependencies]
 anyhow.workspace   = true
 axum.workspace     = true
-clap               = { workspace = true, features = [ "derive", "env" ] }
 hex.workspace      = true
+pound.workspace    = true
 tokio              = { workspace = true, features = [ "macros", "rt-multi-thread", "signal", "time", "net", "fs" ] }
 tracing.workspace  = true
 tracing-subscriber = { workspace = true, features = [ "env-filter", "json" ] }

@@ -1,9 +1,9 @@
-use clap::Parser;
 use ncro_config::Config;
 use ncro_db::Db;
 use ncro_discovery::Discovery;
 use ncro_health::Prober;
 use ncro_router::{Router, RouterTuning};
+use pound::Parse;
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -70,10 +70,12 @@ fn sd_notify_ready() {
   }
 }
 
-#[derive(Debug, Parser)]
-#[command(name = "ncro", version, about = "Nix Cache Route Optimizer")]
+#[derive(Debug, Parse)]
+#[pound(name = "ncro")]
+/// Nix Cache Route Optimizer
 pub struct Args {
-  #[arg(short, long, env = "NCRO_CONFIG")]
+  /// Path to the configuration file.
+  #[pound(short, long, env = "NCRO_CONFIG")]
   pub config: Option<String>,
 }
 
