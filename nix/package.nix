@@ -1,9 +1,16 @@
 {
   lib,
+  stdenv,
   rustPlatform,
   pkg-config,
+  openssl,
   cacert,
+  clang,
+  wild ? null,
 }: let
+  # wild + clang are only used on Linux tier-1 arches
+  hasWild =
+    stdenv.hostPlatform.isLinux && (stdenv.hostPlatform.isx86_64 || stdenv.hostPlatform.isAarch64);
   cargoTOML = (lib.importTOML ../Cargo.toml).workspace.package;
 in
   rustPlatform.buildRustPackage (finalAttrs: {
@@ -26,11 +33,29 @@ in
 
     useNextest = true;
     cargoLock.lockFile = "${finalAttrs.src}/Cargo.lock";
-    nativeBuildInputs = [pkg-config cacert];
+    nativeBuildInputs =
+      [pkg-config cacert]
+      ++ (lib.optionals hasWild [
+        wild
+        clang
+      ]);
 
-    # reqwest (rustls) needs a CA bundle to construct a TLS client, even in
-    # tests that never make network requests.
-    env.SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
+    buildInputs = [
+      openssl.dev
+    ];
+
+    env =
+      {
+        # reqwest (rustls) needs a CA bundle to construct a TLS client, even in
+        # tests that never make network requests.
+        SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
+
+        # Link nixpkgs c libs, no vendored copies.
+        OPENSSL_NO_VENDOR = 1;
+      }
+      // lib.optionalAttrs hasWild {
+        RUSTFLAGS = "-Clinker=${clang}/bin/clang -Clink-arg=--ld-path=wild";
+      };
 
     meta = {
       homepage = "https://github.com/feel-co/ncro";
