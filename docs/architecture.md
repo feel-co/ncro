@@ -35,10 +35,22 @@ sequenceDiagram
   else cache miss
     N->>U: race requests in parallel
     U-->>N: first success wins
-    N->>S: store route
+    N->>N: parse narinfo and apply upstream filters
+    alt accepted
+      N->>S: store route
+    else rejected
+      N->>U: continue with remaining candidates
+    end
   end
   N-->>C: response
 ```
+
+Path filters sit after the narinfo fetch, not before the upstream race. A Nix
+client requests `/<hash>.narinfo`, so ncro only knows the store hash at the start
+of routing. The full `StorePath`, references, and deriver are inside the narinfo
+body. This means filtering is a validation step for candidate winners: if a
+winning upstream's narinfo is rejected, the route is not cached and ncro retries
+the remaining candidates.
 
 NAR streaming, on another hand, follows a different path. There is actually no
 race and when a client requests `/nar/<hash>.nar`, ncro looks up the route for
@@ -88,6 +100,8 @@ flowchart TD
 Selection is driven by latency first. When two upstreams are effectively tied,
 `priority` breaks the tie. The router also tracks failures and probe volume so
 it can distinguish a briefly slow cache from one that is trending unhealthy.
+Per-upstream filters can reject a candidate winner after its narinfo is fetched;
+this prevents project-specific caches from becoming winners for unrelated paths.
 
 > [!TIP]
 > Persistence is intentionally narrow. SQLite stores two kinds of data so a
@@ -126,7 +140,13 @@ The most important settings are `upstreams`, `server.listen`, `cache.db_path`,
 `server.cache_priority`, `discovery.enabled`, `discovery.address_family`, and `mesh.enabled`.
 
 `upstreams` defines the cache backends ncro can use. Each upstream can carry a
-`priority` value and an optional `public_key` for mesh verification.
+`priority` value, optional Basic Auth credentials, an optional `public_key` for
+narinfo signature verification, and optional `filters`.
+
+Upstream filters support `allow` and `deny` rules over narinfo fields. The
+available fields are `name`, `store_path`, `reference`, and `deriver`; patterns
+use `*` wildcards. Deny rules always win. If any allow rules are configured for
+an upstream, at least one must match for that upstream to be accepted.
 
 `cache.ttl` is how long a successful routing decision remains trusted. The
 negative TTL applies to failed lookups so ncro does not immediately retry the
