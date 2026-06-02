@@ -77,8 +77,10 @@ The request flow follows two distinct paths depending on the request type:
    upstream without probing others
 3. On a miss, it races HEAD requests to all configured upstreams in parallel
 4. The fastest upstream wins; the full narinfo body is fetched from that
-   upstream and returned to the client
-5. The winning route is persisted with a configurable TTL; subsequent requests
+   upstream and checked against any per-upstream filters
+5. If the upstream is rejected by filters, ncro tries the remaining candidates;
+   otherwise the narinfo is returned to the client
+6. The winning route is persisted with a configurable TTL; subsequent requests
    for the same hash use the cached route directly
 
 ### NAR Streaming
@@ -120,6 +122,9 @@ further in the [architechture document].
 - On a cache miss, ncro races all configured upstreams in parallel and returns
   the first successful response. Unhealthy upstreams (detected by consecutive
   probe failures) are excluded from the race until they recover.
+- Per-upstream filters are applied after ncro fetches the full narinfo from a
+  candidate winner. Rejected upstreams are not cached as winners and ncro keeps
+  looking for another acceptable upstream.
 
 ## Quick Start
 
@@ -219,6 +224,51 @@ gossip_interval = "30s"
 
 Environment overrides are useful for containerized or Systemd deployments where
 you want a fixed config file but still need to tweak one or two settings.
+
+### Path Filters
+
+Upstreams can have allow/deny filters. Filters are evaluated after an upstream
+wins the narinfo race, because the incoming request only contains the store hash
+(`/<hash>.narinfo`) and the full `StorePath` is only available after fetching
+the narinfo body.
+
+```toml
+[[upstreams]]
+url = "https://max.cachix.org"
+priority = 100
+
+[[upstreams.filters]]
+action  = "allow"
+field   = "name"
+pattern = "zedless*"
+
+[[upstreams.filters]]
+action  = "deny"
+field   = "name"
+pattern = "*-source"
+```
+
+Supported actions:
+
+- `allow`
+- `deny`
+
+Supported fields:
+
+- `name`: store path name after the hash, such as `zedless-0.1.0`
+- `store_path`: full `/nix/store/<hash>-<name>` path
+- `reference`: entries from the narinfo `References` field
+- `deriver`: the narinfo `Deriver` field
+
+Patterns support `*` wildcards. A deny rule always rejects a matching narinfo.
+If an upstream has at least one allow rule, at least one allow rule must match;
+otherwise the upstream is rejected. If an upstream has no allow rules, it is
+accepted unless a deny rule matches.
+
+For a project-specific cache that should only serve `zedless`, prefer a high
+`priority` plus an allow filter. The high priority keeps it behind general
+caches for routing, while the filter prevents unrelated paths from being
+accepted if the cache happens to respond first.
 
 ### S3 Upstreams
 
