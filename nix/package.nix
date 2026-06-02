@@ -24,6 +24,7 @@ in
         ];
       };
 
+    useNextest = true;
     cargoLock.lockFile = "${finalAttrs.src}/Cargo.lock";
     nativeBuildInputs = [pkg-config cacert];
 
