@@ -288,6 +288,16 @@ impl Router {
     store_hash: &str,
   ) -> Result<Option<ResolveResult>, RouterError> {
     if let Some(cached) = self.inner.lru.get(store_hash).await {
+      if !self
+        .cached_route_allows_filters(
+          &cached.url,
+          cached.narinfo_bytes.as_deref(),
+        )
+        .await
+      {
+        self.inner.lru.invalidate(store_hash).await;
+        return Ok(None);
+      }
       ncro_metrics::get().narinfo_cache_hits.inc();
       return Ok(Some((*cached).clone()));
     }
@@ -299,6 +309,15 @@ impl Router {
     }
     let health = self.inner.prober.get_health(&entry.upstream_url).await;
     if health.as_ref().is_some_and(|h| h.status == Status::Down) {
+      return Ok(None);
+    }
+    if !self
+      .cached_route_allows_filters(
+        &entry.upstream_url,
+        entry.narinfo_bytes.as_deref(),
+      )
+      .await
+    {
       return Ok(None);
     }
     ncro_metrics::get().narinfo_cache_hits.inc();
@@ -338,7 +357,7 @@ impl Router {
       filtered
     };
 
-    // Group candidates by priority. Lower number meanshigher priority, tried
+    // Group candidates by priority. Lower number means higher priority, tried
     // first. Upstreams whose health entry is missing get i32::MAX so that they
     // fall into the lowest-priority group rather than being silently dropped.
     let mut groups: BTreeMap<i32, Vec<String>> = BTreeMap::new();
@@ -363,18 +382,33 @@ impl Router {
         match group_result {
           Ok(winner) => {
             let winner_url = winner.url.clone();
-            match self.commit_winner(winner, store_hash).await? {
-              CommitOutcome::Accepted(result) => {
+            match self.commit_winner(winner, store_hash).await {
+              Ok(CommitOutcome::Accepted(result)) => {
                 ncro_metrics::get()
                   .narinfo_upstream_attempts_per_resolve
                   .with_label_values(&["success"])
                   .observe(f64::from(attempts_total));
                 return Ok(result);
               },
-              CommitOutcome::Rejected => {
+              Ok(CommitOutcome::Rejected) => {
                 any_not_found = true;
                 group_candidates.retain(|url| url != &winner_url);
               },
+              Err(err) if commit_error_is_retryable(&err) => {
+                if commit_error_is_network_like(&err) {
+                  self.mark_cooldown(&winner_url);
+                } else {
+                  any_not_found = true;
+                }
+                tracing::warn!(
+                  upstream = &winner_url,
+                  store = store_hash,
+                  error = %err,
+                  "narinfo winner could not be committed; trying next candidate"
+                );
+                group_candidates.retain(|url| url != &winner_url);
+              },
+              Err(err) => return Err(err),
             }
           },
           Err(RaceGroupError::NotFound) => {
@@ -669,6 +703,29 @@ impl Router {
     !has_allow || allow_matched
   }
 
+  async fn cached_route_allows_filters(
+    &self,
+    upstream: &str,
+    narinfo_bytes: Option<&[u8]>,
+  ) -> bool {
+    if !self
+      .inner
+      .upstream_filters
+      .read()
+      .await
+      .contains_key(upstream)
+    {
+      return true;
+    }
+    let Some(bytes) = narinfo_bytes else {
+      return false;
+    };
+    let Ok(narinfo) = NarInfo::parse(bytes) else {
+      return false;
+    };
+    self.upstream_allows_narinfo(upstream, &narinfo).await
+  }
+
   async fn fetch_narinfo(
     &self,
     upstream: &str,
@@ -729,6 +786,17 @@ fn filter_rule_matches(rule: &FilterRule, narinfo: &NarInfo) -> bool {
   }
 }
 
+const fn commit_error_is_retryable(err: &RouterError) -> bool {
+  matches!(
+    err,
+    RouterError::NotFound | RouterError::FetchNarinfo(_) | RouterError::S3(_)
+  )
+}
+
+const fn commit_error_is_network_like(err: &RouterError) -> bool {
+  matches!(err, RouterError::FetchNarinfo(_) | RouterError::S3(_))
+}
+
 fn store_path_name(store_path: &str) -> &str {
   let Some(base) = store_path.rsplit('/').next() else {
     return store_path;
@@ -771,9 +839,14 @@ mod tests {
   #![expect(clippy::unwrap_used, reason = "Fine in tests")]
   use std::{sync::Arc, time::Duration};
 
+  use ncro_config::UpstreamConfig;
   use ncro_db::Db;
   use ncro_health::Prober;
-  use tokio::sync::Mutex;
+  use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    sync::Mutex,
+  };
 
   use super::{
     FilterAction,
@@ -789,8 +862,16 @@ mod tests {
   };
 
   async fn make_router(cooldown: Duration) -> Router {
+    make_router_with_upstreams(cooldown, &[]).await
+  }
+
+  async fn make_router_with_upstreams(
+    cooldown: Duration,
+    upstreams: &[UpstreamConfig],
+  ) -> Router {
     let db = Db::open(":memory:", 100).await.unwrap();
     let prober = Prober::new(0.3).unwrap();
+    prober.init_upstreams(upstreams).await;
     Router::new(
       db,
       prober,
@@ -805,6 +886,76 @@ mod tests {
       },
     )
     .unwrap()
+  }
+
+  async fn spawn_narinfo_server(get_status: u16, store_name: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let store_name = store_name.to_string();
+    tokio::spawn(async move {
+      loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+          return;
+        };
+        let store_name = store_name.clone();
+        tokio::spawn(async move {
+          let mut buf = [0_u8; 1024];
+          let Ok(n) = stream.read(&mut buf).await else {
+            return;
+          };
+          let request = String::from_utf8_lossy(&buf[..n]);
+          if request.starts_with("HEAD ") {
+            let _ = stream
+              .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+              .await;
+            return;
+          }
+          if request.starts_with("GET ") && get_status == 200 {
+            let body = format!(
+              "StorePath: /nix/store/abc123-{store_name}\nURL: \
+               nar/test.nar.xz\nCompression: xz\nNarHash: \
+               sha256:abc\nNarSize: 1\nReferences: \n"
+            );
+            let response = format!(
+              "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+              body.len(),
+              body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            return;
+          }
+          let _ = stream
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+            .await;
+        });
+      }
+    });
+    format!("http://{addr}")
+  }
+
+  async fn spawn_head_ok_get_drop_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+      loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+          return;
+        };
+        tokio::spawn(async move {
+          let mut buf = [0_u8; 1024];
+          let Ok(n) = stream.read(&mut buf).await else {
+            return;
+          };
+          let request = String::from_utf8_lossy(&buf[..n]);
+          if request.starts_with("HEAD ") {
+            let _ = stream
+              .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+              .await;
+          }
+        });
+      }
+    });
+    format!("http://{addr}")
   }
 
   #[test]
@@ -848,6 +999,134 @@ mod tests {
       },
       &narinfo,
     ));
+  }
+
+  #[tokio::test]
+  async fn resolve_retries_after_winner_get_returns_not_found() {
+    let failing = spawn_narinfo_server(500, "wrong").await;
+    let working = spawn_narinfo_server(200, "zedless-0.1.0").await;
+    let router = make_router_with_upstreams(Duration::from_mins(1), &[
+      UpstreamConfig {
+        url: failing.clone(),
+        priority: 1,
+        ..Default::default()
+      },
+      UpstreamConfig {
+        url: working.clone(),
+        priority: 2,
+        ..Default::default()
+      },
+    ])
+    .await;
+
+    let result = router
+      .resolve("abc123", &[failing.clone(), working.clone()])
+      .await
+      .unwrap();
+
+    assert_eq!(result.url, working);
+    assert!(!router.in_cooldown(&failing));
+  }
+
+  #[tokio::test]
+  async fn resolve_retries_after_winner_get_network_error() {
+    let failing = spawn_head_ok_get_drop_server().await;
+    let working = spawn_narinfo_server(200, "zedless-0.1.0").await;
+    let router = make_router_with_upstreams(Duration::from_mins(1), &[
+      UpstreamConfig {
+        url: failing.clone(),
+        priority: 1,
+        ..Default::default()
+      },
+      UpstreamConfig {
+        url: working.clone(),
+        priority: 2,
+        ..Default::default()
+      },
+    ])
+    .await;
+
+    let result = router
+      .resolve("abc123", &[failing.clone(), working.clone()])
+      .await
+      .unwrap();
+
+    assert_eq!(result.url, working);
+    assert!(router.in_cooldown(&failing));
+  }
+
+  #[tokio::test]
+  async fn resolve_retries_after_filter_rejects_winner() {
+    let rejected = spawn_narinfo_server(200, "unrelated-1.0").await;
+    let accepted = spawn_narinfo_server(200, "zedless-0.1.0").await;
+    let router = make_router_with_upstreams(Duration::from_mins(1), &[
+      UpstreamConfig {
+        url: rejected.clone(),
+        priority: 1,
+        ..Default::default()
+      },
+      UpstreamConfig {
+        url: accepted.clone(),
+        priority: 2,
+        ..Default::default()
+      },
+    ])
+    .await;
+    router
+      .set_upstream_filters(rejected.clone(), vec![FilterRule {
+        action:  FilterAction::Allow,
+        field:   FilterField::Name,
+        pattern: "zedless*".to_string(),
+      }])
+      .await;
+
+    let result = router
+      .resolve("abc123", &[rejected, accepted.clone()])
+      .await
+      .unwrap();
+
+    assert_eq!(result.url, accepted);
+  }
+
+  #[tokio::test]
+  async fn cached_route_is_revalidated_against_new_filters() {
+    let previously_accepted = spawn_narinfo_server(200, "unrelated-1.0").await;
+    let accepted = spawn_narinfo_server(200, "zedless-0.1.0").await;
+    let router = make_router_with_upstreams(Duration::from_mins(1), &[
+      UpstreamConfig {
+        url: previously_accepted.clone(),
+        priority: 1,
+        ..Default::default()
+      },
+      UpstreamConfig {
+        url: accepted.clone(),
+        priority: 2,
+        ..Default::default()
+      },
+    ])
+    .await;
+
+    let cached = router
+      .resolve("abc123", std::slice::from_ref(&previously_accepted))
+      .await
+      .unwrap();
+    assert_eq!(cached.url, previously_accepted);
+
+    router
+      .set_upstream_filters(previously_accepted.clone(), vec![FilterRule {
+        action:  FilterAction::Allow,
+        field:   FilterField::Name,
+        pattern: "zedless*".to_string(),
+      }])
+      .await;
+
+    let result = router
+      .resolve("abc123", &[previously_accepted, accepted.clone()])
+      .await
+      .unwrap();
+
+    assert_eq!(result.url, accepted);
+    assert!(!result.cache_hit);
   }
 
   #[test]
