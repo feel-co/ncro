@@ -138,6 +138,20 @@ mod tests {
   }
 
   #[test]
+  fn parses_upstream_filters() -> Result<(), ConfigError> {
+    let cfg: Config = toml::from_str(
+      "[[upstreams]]\nurl = \"https://cache.example\"\n\n\
+       [[upstreams.filters]]\naction = \"allow\"\nfield = \"name\"\npattern = \"zedless*\"\n\n\
+       [[upstreams.filters]]\naction = \"deny\"\nfield = \"store_path\"\npattern = \"*-source\"\n",
+    )?;
+    cfg.validate()?;
+    assert_eq!(cfg.upstreams[0].filters.len(), 2);
+    assert_eq!(cfg.upstreams[0].filters[0].action, FilterAction::Allow);
+    assert_eq!(cfg.upstreams[0].filters[0].field, FilterField::Name);
+    Ok(())
+  }
+
+  #[test]
   fn s3_url_custom_endpoint_http() -> Result<(), ConfigError> {
     assert_eq!(
       parse_s3_url(
@@ -277,6 +291,32 @@ impl<'de> Deserialize<'de> for HumanDuration {
   }
 }
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterAction {
+  #[default]
+  Allow,
+  Deny,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterField {
+  #[default]
+  Name,
+  StorePath,
+  Reference,
+  Deriver,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FilterRule {
+  pub action:  FilterAction,
+  pub field:   FilterField,
+  pub pattern: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct UpstreamConfig {
@@ -285,6 +325,7 @@ pub struct UpstreamConfig {
   pub public_key: String,
   pub username:   String,
   pub password:   Option<String>,
+  pub filters:    Vec<FilterRule>,
   #[serde(skip)]
   pub s3:         Option<S3Config>,
 }
@@ -532,6 +573,13 @@ impl Config {
         return Err(ConfigError::Validation(format!(
           "upstream[{i}]: public_key must be in 'name:base64(key)' Nix format"
         )));
+      }
+      for (j, filter) in upstream.filters.iter().enumerate() {
+        if filter.pattern.is_empty() {
+          return Err(ConfigError::Validation(format!(
+            "upstream[{i}].filters[{j}]: pattern is empty"
+          )));
+        }
       }
     }
     if self.server.cache_priority < 1 {
