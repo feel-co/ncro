@@ -13,6 +13,14 @@ url        = "https://cache.nixos.org"
 priority = 20
 url      = "https://nix-community.cachix.org"
 
+# Optional per-upstream filters. Deny rules always reject matching paths. If an
+# upstream has any allow rules, at least one allow rule must match.
+#
+# [[upstreams.filters]]
+# action  = "allow"      # allow | deny
+# field   = "name"       # name | store_path | reference | deriver
+# pattern = "zedless*"   # supports '*' wildcards
+
 [cache]
 db_path       = "/var/lib/ncro/routes.db"
 latency_alpha = 0.3
