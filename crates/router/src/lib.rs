@@ -8,6 +8,7 @@ use chrono::Utc;
 use dashmap::{DashMap, mapref::entry::Entry};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use moka::future::Cache as MokaCache;
+use ncro_config::{FilterAction, FilterField, FilterRule};
 use ncro_db::{Db, DbError, RouteEntry};
 use ncro_health::{Prober, Status};
 use ncro_narinfo::{NarInfo, NarInfoError, parse_public_key};
@@ -66,6 +67,7 @@ struct RouterInner {
   s3:                       S3ClientPool,
   upstream_keys:            RwLock<HashMap<String, String>>,
   upstream_auth:            RwLock<HashMap<String, (String, Option<String>)>>,
+  upstream_filters:         RwLock<HashMap<String, Vec<FilterRule>>>,
   inflight:                 DashMap<String, Arc<Mutex<()>>>,
   lru:                      MokaCache<String, Arc<ResolveResult>>,
   miss_lru:                 MokaCache<String, ()>,
@@ -80,6 +82,11 @@ struct RouterInner {
 struct RaceResult {
   url:        String,
   latency_ms: f64,
+}
+
+enum CommitOutcome {
+  Accepted(ResolveResult),
+  Rejected,
 }
 
 /// Outcome of racing a single priority group.
@@ -140,6 +147,7 @@ impl Router {
         s3: S3ClientPool::default(),
         upstream_keys: RwLock::new(HashMap::new()),
         upstream_auth: RwLock::new(HashMap::new()),
+        upstream_filters: RwLock::new(HashMap::new()),
         inflight: DashMap::new(),
         lru: MokaCache::builder()
           .max_capacity(1024)
@@ -192,6 +200,22 @@ impl Router {
       .write()
       .await
       .insert(url, (username, password));
+  }
+
+  pub async fn set_upstream_filters(
+    &self,
+    url: String,
+    filters: Vec<FilterRule>,
+  ) {
+    if filters.is_empty() {
+      return;
+    }
+    self
+      .inner
+      .upstream_filters
+      .write()
+      .await
+      .insert(url, filters);
   }
 
   pub fn register_s3_upstream(
@@ -331,20 +355,36 @@ impl Router {
     let mut any_not_found = false;
     let mut attempts_total = 0_u32;
     for (_priority, group) in groups {
-      let (group_result, attempts) = self.race_group(store_hash, &group).await;
-      attempts_total += attempts;
-      match group_result {
-        Ok(winner) => {
-          ncro_metrics::get()
-            .narinfo_upstream_attempts_per_resolve
-            .with_label_values(&["success"])
-            .observe(f64::from(attempts_total));
-          return self.commit_winner(winner, store_hash).await;
-        },
-        Err(RaceGroupError::NotFound) => any_not_found = true,
-        // Try the next priority group on network error; those upstreams were
-        // unreachable so we cannot conclude the path is absent.
-        Err(RaceGroupError::NetworkError | RaceGroupError::Timeout) => {},
+      let mut group_candidates = group;
+      while !group_candidates.is_empty() {
+        let (group_result, attempts) =
+          self.race_group(store_hash, &group_candidates).await;
+        attempts_total += attempts;
+        match group_result {
+          Ok(winner) => {
+            let winner_url = winner.url.clone();
+            match self.commit_winner(winner, store_hash).await? {
+              CommitOutcome::Accepted(result) => {
+                ncro_metrics::get()
+                  .narinfo_upstream_attempts_per_resolve
+                  .with_label_values(&["success"])
+                  .observe(f64::from(attempts_total));
+                return Ok(result);
+              },
+              CommitOutcome::Rejected => {
+                any_not_found = true;
+                group_candidates.retain(|url| url != &winner_url);
+              },
+            }
+          },
+          Err(RaceGroupError::NotFound) => {
+            any_not_found = true;
+            break;
+          },
+          // Try the next priority group on network error; those upstreams were
+          // unreachable so we cannot conclude the path is absent.
+          Err(RaceGroupError::NetworkError | RaceGroupError::Timeout) => break,
+        }
       }
     }
     ncro_metrics::get()
@@ -519,15 +559,23 @@ impl Router {
     &self,
     winner: RaceResult,
     store_hash: &str,
-  ) -> Result<ResolveResult, RouterError> {
-    let (body, raw_nar_url, nar_hash, nar_size) =
-      self.fetch_narinfo(&winner.url, store_hash).await?;
+  ) -> Result<CommitOutcome, RouterError> {
+    let (body, parsed) = self.fetch_narinfo(&winner.url, store_hash).await?;
+    if !self.upstream_allows_narinfo(&winner.url, &parsed).await {
+      tracing::debug!(
+        upstream = &winner.url,
+        store_path = &parsed.store_path,
+        "narinfo rejected by upstream filter"
+      );
+      return Ok(CommitOutcome::Rejected);
+    }
     // Strip leading slash and query string (harmonia appends ?hash=STORE_HASH)
     // so the DB key is just the path component for consistent lookups.
-    let nar_url = raw_nar_url
+    let nar_url = parsed
+      .url
       .trim_start_matches('/')
       .split_once('?')
-      .map_or_else(|| raw_nar_url.trim_start_matches('/'), |(path, _)| path)
+      .map_or_else(|| parsed.url.trim_start_matches('/'), |(path, _)| path)
       .to_string();
 
     ncro_metrics::get()
@@ -568,8 +616,8 @@ impl Router {
         ttl: now
           + chrono::Duration::from_std(self.inner.route_ttl)
             .unwrap_or_default(),
-        nar_hash,
-        nar_size,
+        nar_hash: parsed.nar_hash,
+        nar_size: parsed.nar_size,
         nar_url,
         narinfo_bytes: body.clone(),
       })
@@ -585,14 +633,47 @@ impl Router {
       .lru
       .insert(store_hash.to_string(), Arc::new(result.clone()))
       .await;
-    Ok(result)
+    Ok(CommitOutcome::Accepted(result))
+  }
+
+  async fn upstream_allows_narinfo(
+    &self,
+    upstream: &str,
+    narinfo: &NarInfo,
+  ) -> bool {
+    let rules = {
+      let filters = self.inner.upstream_filters.read().await;
+      filters.get(upstream).cloned()
+    };
+    let Some(rules) = rules else {
+      return true;
+    };
+    if rules.is_empty() {
+      return true;
+    }
+
+    let has_allow = rules
+      .iter()
+      .any(|rule| matches!(rule.action, FilterAction::Allow));
+    let mut allow_matched = false;
+    for rule in &rules {
+      if !filter_rule_matches(rule, narinfo) {
+        continue;
+      }
+      match rule.action {
+        FilterAction::Deny => return false,
+        FilterAction::Allow => allow_matched = true,
+      }
+    }
+
+    !has_allow || allow_matched
   }
 
   async fn fetch_narinfo(
     &self,
     upstream: &str,
     store_hash: &str,
-  ) -> Result<(Option<Vec<u8>>, String, String, u64), RouterError> {
+  ) -> Result<(Option<Vec<u8>>, NarInfo), RouterError> {
     let body = if self.inner.s3.contains(upstream) {
       self
         .inner
@@ -626,8 +707,63 @@ impl Router {
       );
       return Err(RouterError::SignatureVerificationFailed);
     }
-    Ok((Some(body), parsed.url, parsed.nar_hash, parsed.nar_size))
+    Ok((Some(body), parsed))
   }
+}
+
+fn filter_rule_matches(rule: &FilterRule, narinfo: &NarInfo) -> bool {
+  match rule.field {
+    FilterField::StorePath => {
+      wildcard_match(&rule.pattern, &narinfo.store_path)
+    },
+    FilterField::Name => {
+      wildcard_match(&rule.pattern, store_path_name(&narinfo.store_path))
+    },
+    FilterField::Reference => {
+      narinfo
+        .references
+        .iter()
+        .any(|reference| wildcard_match(&rule.pattern, reference))
+    },
+    FilterField::Deriver => wildcard_match(&rule.pattern, &narinfo.deriver),
+  }
+}
+
+fn store_path_name(store_path: &str) -> &str {
+  let Some(base) = store_path.rsplit('/').next() else {
+    return store_path;
+  };
+  base.split_once('-').map_or(base, |(_, name)| name)
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+  if pattern == "*" {
+    return true;
+  }
+  let mut remainder = value;
+  let parts = pattern.split('*');
+  let anchored_start = !pattern.starts_with('*');
+  let anchored_end = !pattern.ends_with('*');
+  let mut first = true;
+
+  for part in parts {
+    if part.is_empty() {
+      continue;
+    }
+    if first && anchored_start {
+      let Some(next) = remainder.strip_prefix(part) else {
+        return false;
+      };
+      remainder = next;
+    } else if let Some(index) = remainder.find(part) {
+      remainder = &remainder[index + part.len()..];
+    } else {
+      return false;
+    }
+    first = false;
+  }
+
+  !anchored_end || remainder.is_empty()
 }
 
 #[cfg(test)]
@@ -639,7 +775,18 @@ mod tests {
   use ncro_health::Prober;
   use tokio::sync::Mutex;
 
-  use super::{InflightGuard, Router, RouterTuning};
+  use super::{
+    FilterAction,
+    FilterField,
+    FilterRule,
+    InflightGuard,
+    NarInfo,
+    Router,
+    RouterTuning,
+    filter_rule_matches,
+    store_path_name,
+    wildcard_match,
+  };
 
   async fn make_router(cooldown: Duration) -> Router {
     let db = Db::open(":memory:", 100).await.unwrap();
@@ -658,6 +805,49 @@ mod tests {
       },
     )
     .unwrap()
+  }
+
+  #[test]
+  fn extracts_store_path_name() {
+    assert_eq!(
+      store_path_name("/nix/store/abc123-zedless-0.1.0"),
+      "zedless-0.1.0"
+    );
+  }
+
+  #[test]
+  fn wildcard_patterns_match_expected_values() {
+    assert!(wildcard_match("zedless*", "zedless-0.1.0"));
+    assert!(wildcard_match("*-source", "foo-source"));
+    assert!(wildcard_match("*zed*", "my-zedless-package"));
+    assert!(!wildcard_match("zedless", "zedless-0.1.0"));
+  }
+
+  #[test]
+  fn filter_rules_match_selected_fields() {
+    let narinfo = NarInfo {
+      store_path: "/nix/store/abc123-zedless-0.1.0".to_string(),
+      references: vec!["dep-one".to_string()],
+      deriver: "abc123-zedless.drv".to_string(),
+      ..Default::default()
+    };
+
+    assert!(filter_rule_matches(
+      &FilterRule {
+        action:  FilterAction::Allow,
+        field:   FilterField::Name,
+        pattern: "zedless*".to_string(),
+      },
+      &narinfo,
+    ));
+    assert!(filter_rule_matches(
+      &FilterRule {
+        action:  FilterAction::Deny,
+        field:   FilterField::Reference,
+        pattern: "dep-*".to_string(),
+      },
+      &narinfo,
+    ));
   }
 
   #[test]

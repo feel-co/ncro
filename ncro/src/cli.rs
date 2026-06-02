@@ -154,6 +154,9 @@ pub async fn run() -> anyhow::Result<()> {
         )
         .await;
     }
+    router
+      .set_upstream_filters(upstream.url.clone(), upstream.filters.clone())
+      .await;
   }
 
   let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
